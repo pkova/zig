@@ -1311,7 +1311,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 .emit_h = emit_h,
                 .error_name_list = .{},
             };
-            try module.error_name_list.append(gpa, "(no error)");
+            try module.init();
 
             break :blk module;
         } else blk: {
@@ -2058,6 +2058,7 @@ pub fn update(comp: *Compilation, main_progress_node: *std.Progress.Node) !void 
     if (!build_options.only_c and !build_options.omit_pkg_fetching_code) {
         if (comp.emit_docs) |doc_location| {
             if (comp.bin_file.options.module) |module| {
+                if (true) @panic("TODO: get autodoc working again in this branch");
                 var autodoc = Autodoc.init(module, doc_location);
                 defer autodoc.deinit();
                 try autodoc.generateZirData();

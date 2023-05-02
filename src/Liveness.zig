@@ -140,7 +140,7 @@ fn LivenessPassData(comptime pass: LivenessPass) type {
     };
 }
 
-pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
+pub fn analyze(gpa: Allocator, air: Air, intern_pool: *const InternPool) Allocator.Error!Liveness {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -153,6 +153,7 @@ pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
         ),
         .extra = .{},
         .special = .{},
+        .intern_pool = intern_pool,
     };
     errdefer gpa.free(a.tomb_bits);
     errdefer a.special.deinit(gpa);
@@ -331,6 +332,7 @@ pub fn categorizeOperand(
         .ret_ptr,
         .constant,
         .const_ty,
+        .interned,
         .trap,
         .breakpoint,
         .dbg_stmt,
@@ -829,6 +831,7 @@ pub const BigTomb = struct {
 const Analysis = struct {
     gpa: Allocator,
     air: Air,
+    intern_pool: *const InternPool,
     tomb_bits: []usize,
     special: std.AutoHashMapUnmanaged(Air.Inst.Index, u32),
     extra: std.ArrayListUnmanaged(u32),
@@ -1021,6 +1024,7 @@ fn analyzeInst(
 
         .constant,
         .const_ty,
+        .interned,
         => unreachable,
 
         .trap,
@@ -1305,6 +1309,7 @@ fn analyzeOperands(
 ) Allocator.Error!void {
     const gpa = a.gpa;
     const inst_tags = a.air.instructions.items(.tag);
+    const ip = a.intern_pool;
 
     switch (pass) {
         .loop_analysis => {
@@ -1315,7 +1320,7 @@ fn analyzeOperands(
 
                 // Don't compute any liveness for constants
                 switch (inst_tags[operand]) {
-                    .constant, .const_ty => continue,
+                    .constant, .const_ty, .interned => continue,
                     else => {},
                 }
 
@@ -1344,7 +1349,7 @@ fn analyzeOperands(
             // If our result is unused and the instruction doesn't need to be lowered, backends will
             // skip the lowering of this instruction, so we don't want to record uses of operands.
             // That way, we can mark as many instructions as possible unused.
-            if (!immediate_death or a.air.mustLower(inst)) {
+            if (!immediate_death or a.air.mustLower(inst, ip.*)) {
                 // Note that it's important we iterate over the operands backwards, so that if a dying
                 // operand is used multiple times we mark its last use as its death.
                 var i = operands.len;
@@ -1355,7 +1360,7 @@ fn analyzeOperands(
 
                     // Don't compute any liveness for constants
                     switch (inst_tags[operand]) {
-                        .constant, .const_ty => continue,
+                        .constant, .const_ty, .interned => continue,
                         else => {},
                     }
 
@@ -2014,6 +2019,7 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
 
         /// Must be called with operands in reverse order.
         fn feed(big: *Self, op_ref: Air.Inst.Ref) !void {
+            const ip = big.a.intern_pool;
             // Note that after this, `operands_remaining` becomes the index of the current operand
             big.operands_remaining -= 1;
 
@@ -2027,14 +2033,14 @@ fn AnalyzeBigOperands(comptime pass: LivenessPass) type {
             // Don't compute any liveness for constants
             const inst_tags = big.a.air.instructions.items(.tag);
             switch (inst_tags[operand]) {
-                .constant, .const_ty => return,
+                .constant, .const_ty, .interned => return,
                 else => {},
             }
 
             // If our result is unused and the instruction doesn't need to be lowered, backends will
             // skip the lowering of this instruction, so we don't want to record uses of operands.
             // That way, we can mark as many instructions as possible unused.
-            if (big.will_die_immediately and !big.a.air.mustLower(big.inst)) return;
+            if (big.will_die_immediately and !big.a.air.mustLower(big.inst, ip.*)) return;
 
             const extra_byte = (big.operands_remaining - (bpi - 1)) / 31;
             const extra_bit = @intCast(u5, big.operands_remaining - (bpi - 1) - extra_byte * 31);

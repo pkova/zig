@@ -2085,7 +2085,7 @@ fn failWithUseOfAsync(sema: *Sema, block: *Block, src: LazySrcLoc) CompileError 
 
 fn failWithInvalidFieldAccess(sema: *Sema, block: *Block, src: LazySrcLoc, object_ty: Type, field_name: []const u8) CompileError {
     const mod = sema.mod;
-    const inner_ty = if (object_ty.isSinglePointer()) object_ty.childType() else object_ty;
+    const inner_ty = if (object_ty.isSinglePointer(mod)) object_ty.childType() else object_ty;
 
     if (inner_ty.zigTypeTag(mod) == .Optional) opt: {
         var buf: Type.Payload.ElemType = undefined;
@@ -3404,8 +3404,9 @@ fn indexablePtrLen(
     src: LazySrcLoc,
     object: Air.Inst.Ref,
 ) CompileError!Air.Inst.Ref {
+    const mod = sema.mod;
     const object_ty = sema.typeOf(object);
-    const is_pointer_to = object_ty.isSinglePointer();
+    const is_pointer_to = object_ty.isSinglePointer(mod);
     const array_ty = if (is_pointer_to) object_ty.childType() else object_ty;
     try checkIndexable(sema, block, src, array_ty);
     return sema.fieldVal(block, src, object, "len", src);
@@ -12661,12 +12662,12 @@ fn zirArrayCat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
             .Pointer => try sema.resolveDefinedValue(block, rhs_src, rhs),
             else => unreachable,
         }) |rhs_val| {
-            const lhs_sub_val = if (lhs_ty.isSinglePointer())
+            const lhs_sub_val = if (lhs_ty.isSinglePointer(mod))
                 (try sema.pointerDeref(block, lhs_src, lhs_val, lhs_ty)).?
             else
                 lhs_val;
 
-            const rhs_sub_val = if (rhs_ty.isSinglePointer())
+            const rhs_sub_val = if (rhs_ty.isSinglePointer(mod))
                 (try sema.pointerDeref(block, rhs_src, rhs_val, rhs_ty)).?
             else
                 rhs_val;
@@ -12919,7 +12920,7 @@ fn zirArrayMul(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     if (try sema.resolveDefinedValue(block, lhs_src, lhs)) |lhs_val| {
         const final_len_including_sent = result_len + @boolToInt(lhs_info.sentinel != null);
 
-        const lhs_sub_val = if (lhs_ty.isSinglePointer())
+        const lhs_sub_val = if (lhs_ty.isSinglePointer(mod))
             (try sema.pointerDeref(block, lhs_src, lhs_val, lhs_ty)).?
         else
             lhs_val;
@@ -17486,7 +17487,7 @@ fn zirPtrType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
     const elem_ty = blk: {
         const air_inst = try sema.resolveInst(extra.data.elem_type);
         const ty = sema.analyzeAsType(block, elem_ty_src, air_inst) catch |err| {
-            if (err == error.AnalysisFail and sema.err != null and sema.typeOf(air_inst).isSinglePointer()) {
+            if (err == error.AnalysisFail and sema.err != null and sema.typeOf(air_inst).isSinglePointer(mod)) {
                 try sema.errNote(block, elem_ty_src, sema.err.?, "use '.*' to dereference pointer", .{});
             }
             return err;
@@ -23732,7 +23733,7 @@ fn fieldVal(
     // Zig allows dereferencing a single pointer during field lookup. Note that
     // we don't actually need to generate the dereference some field lookups, like the
     // length of arrays and other comptime operations.
-    const is_pointer_to = object_ty.isSinglePointer();
+    const is_pointer_to = object_ty.isSinglePointer(mod);
 
     const inner_ty = if (is_pointer_to)
         object_ty.childType()
@@ -23922,7 +23923,7 @@ fn fieldPtr(
     // Zig allows dereferencing a single pointer during field lookup. Note that
     // we don't actually need to generate the dereference some field lookups, like the
     // length of arrays and other comptime operations.
-    const is_pointer_to = object_ty.isSinglePointer();
+    const is_pointer_to = object_ty.isSinglePointer(mod);
 
     const inner_ty = if (is_pointer_to)
         object_ty.childType()
@@ -25460,7 +25461,7 @@ fn coerceExtra(
             // *T to *[1]T
             single_item: {
                 if (dest_info.size != .One) break :single_item;
-                if (!inst_ty.isSinglePointer()) break :single_item;
+                if (!inst_ty.isSinglePointer(mod)) break :single_item;
                 if (!sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result)) break :pointer;
                 const ptr_elem_ty = inst_ty.childType();
                 const array_ty = dest_info.pointee_type;
@@ -25477,7 +25478,7 @@ fn coerceExtra(
 
             // Coercions where the source is a single pointer to an array.
             src_array_ptr: {
-                if (!inst_ty.isSinglePointer()) break :src_array_ptr;
+                if (!inst_ty.isSinglePointer(mod)) break :src_array_ptr;
                 if (!sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result)) break :pointer;
                 const array_ty = inst_ty.childType();
                 if (array_ty.zigTypeTag(mod) != .Array) break :src_array_ptr;
@@ -25632,7 +25633,7 @@ fn coerceExtra(
                 .One => switch (dest_info.pointee_type.zigTypeTag(mod)) {
                     .Union => {
                         // pointer to anonymous struct to pointer to union
-                        if (inst_ty.isSinglePointer() and
+                        if (inst_ty.isSinglePointer(mod) and
                             inst_ty.childType().isAnonStruct() and
                             sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result))
                         {
@@ -25641,7 +25642,7 @@ fn coerceExtra(
                     },
                     .Struct => {
                         // pointer to anonymous struct to pointer to struct
-                        if (inst_ty.isSinglePointer() and
+                        if (inst_ty.isSinglePointer(mod) and
                             inst_ty.childType().isAnonStruct() and
                             sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result))
                         {
@@ -25653,7 +25654,7 @@ fn coerceExtra(
                     },
                     .Array => {
                         // pointer to tuple to pointer to array
-                        if (inst_ty.isSinglePointer() and
+                        if (inst_ty.isSinglePointer(mod) and
                             inst_ty.childType().isTuple() and
                             sema.checkPtrAttributes(dest_ty, inst_ty, &in_memory_result))
                         {
@@ -25672,7 +25673,7 @@ fn coerceExtra(
                         );
                     }
 
-                    if (!inst_ty.isSinglePointer()) break :to_slice;
+                    if (!inst_ty.isSinglePointer(mod)) break :to_slice;
                     const inst_child_ty = inst_ty.childType();
                     if (!inst_child_ty.isTuple()) break :to_slice;
 
@@ -30601,7 +30602,7 @@ fn resolvePeerTypes(
                 .Vector => continue,
                 else => {},
             },
-            .Fn => if (chosen_ty.isSinglePointer() and chosen_ty.isConstPtr() and chosen_ty.childType().zigTypeTag(mod) == .Fn) {
+            .Fn => if (chosen_ty.isSinglePointer(mod) and chosen_ty.isConstPtr() and chosen_ty.childType().zigTypeTag(mod) == .Fn) {
                 if (.ok == try sema.coerceInMemoryAllowedFns(block, chosen_ty.childType(), candidate_ty, target, src, src)) {
                     continue;
                 }

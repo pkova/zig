@@ -4286,7 +4286,7 @@ fn airFloatSign(self: *Self, inst: Air.Inst.Index) !void {
 fn airSqrt(self: *Self, inst: Air.Inst.Index) !void {
     const mod = self.bin_file.options.module.?;
     const un_op = self.air.instructions.items(.data)[inst].un_op;
-    const ty = self.air.typeOf(un_op);
+    const ty = self.typeOf(un_op);
 
     const src_mcv = try self.resolveInst(un_op);
     const dst_mcv = if (src_mcv.isRegister() and self.reuseOperand(inst, un_op, 0, src_mcv))
@@ -4859,7 +4859,7 @@ fn airFieldParentPtr(self: *Self, inst: Air.Inst.Index) !void {
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const extra = self.air.extraData(Air.FieldParentPtr, ty_pl.payload).data;
 
-    const inst_ty = self.air.typeOfIndex(inst);
+    const inst_ty = self.typeOfIndex(inst);
     const parent_ty = inst_ty.childType();
     const field_offset = @intCast(i32, parent_ty.structFieldOffset(extra.field_index, mod));
 

@@ -85,9 +85,9 @@ pub const Type = struct {
                     .address_space,
                     .float_mode,
                     .reduce_op,
+                    .call_modifier,
                     => return .Enum,
 
-                    .call_modifier,
                     .prefetch_options,
                     .export_options,
                     .extern_options,
@@ -95,7 +95,7 @@ pub const Type = struct {
 
                     .type_info => return .Union,
 
-                    .generic_poison => unreachable,
+                    .generic_poison => return error.GenericPoison,
                 },
 
                 .extern_func,
@@ -106,8 +106,6 @@ pub const Type = struct {
             }
         }
         switch (ty.tag()) {
-            .generic_poison => return error.GenericPoison,
-
             .u1,
             .u8,
             .i8,
@@ -124,19 +122,11 @@ pub const Type = struct {
 
             .error_set,
             .error_set_single,
-            .anyerror,
             .error_set_inferred,
             .error_set_merged,
             => return .ErrorSet,
 
-            .anyopaque, .@"opaque" => return .Opaque,
-            .bool => return .Bool,
-            .void => return .Void,
-            .type => return .Type,
-            .comptime_int => return .ComptimeInt,
-            .noreturn => return .NoReturn,
-            .null => return .Null,
-            .undefined => return .Undefined,
+            .@"opaque" => return .Opaque,
 
             .function => return .Fn,
 
@@ -171,18 +161,14 @@ pub const Type = struct {
             .optional_single_const_pointer,
             .optional_single_mut_pointer,
             => return .Optional,
-            .enum_literal => return .EnumLiteral,
 
             .anyerror_void_error_union, .error_union => return .ErrorUnion,
 
-            .anyframe_T, .@"anyframe" => return .AnyFrame,
+            .anyframe_T => return .AnyFrame,
 
             .empty_struct,
             .empty_struct_literal,
             .@"struct",
-            .prefetch_options,
-            .export_options,
-            .extern_options,
             .tuple,
             .anon_struct,
             => return .Struct,
@@ -191,19 +177,11 @@ pub const Type = struct {
             .enum_nonexhaustive,
             .enum_simple,
             .enum_numbered,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
             => return .Enum,
 
             .@"union",
             .union_safety_tagged,
             .union_tagged,
-            .type_info,
             => return .Union,
 
             .bound_fn => unreachable,
@@ -395,7 +373,7 @@ pub const Type = struct {
     pub fn ptrInfo(self: Type) Payload.Pointer {
         switch (self.tag()) {
             .single_const_pointer_to_comptime_int => return .{ .data = .{
-                .pointee_type = Type.initTag(.comptime_int),
+                .pointee_type = Type.comptime_int,
                 .sentinel = null,
                 .@"align" = 0,
                 .@"addrspace" = .generic,
@@ -407,7 +385,7 @@ pub const Type = struct {
                 .size = .One,
             } },
             .const_slice_u8 => return .{ .data = .{
-                .pointee_type = Type.initTag(.u8),
+                .pointee_type = Type.u8,
                 .sentinel = null,
                 .@"align" = 0,
                 .@"addrspace" = .generic,
@@ -419,7 +397,7 @@ pub const Type = struct {
                 .size = .Slice,
             } },
             .const_slice_u8_sentinel_0 => return .{ .data = .{
-                .pointee_type = Type.initTag(.u8),
+                .pointee_type = Type.u8,
                 .sentinel = Value.zero,
                 .@"align" = 0,
                 .@"addrspace" = .generic,
@@ -467,7 +445,7 @@ pub const Type = struct {
                 .size = .Many,
             } },
             .manyptr_const_u8 => return .{ .data = .{
-                .pointee_type = Type.initTag(.u8),
+                .pointee_type = Type.u8,
                 .sentinel = null,
                 .@"align" = 0,
                 .@"addrspace" = .generic,
@@ -479,7 +457,7 @@ pub const Type = struct {
                 .size = .Many,
             } },
             .manyptr_const_u8_sentinel_0 => return .{ .data = .{
-                .pointee_type = Type.initTag(.u8),
+                .pointee_type = Type.u8,
                 .sentinel = Value.zero,
                 .@"align" = 0,
                 .@"addrspace" = .generic,
@@ -503,7 +481,7 @@ pub const Type = struct {
                 .size = .Many,
             } },
             .manyptr_u8 => return .{ .data = .{
-                .pointee_type = Type.initTag(.u8),
+                .pointee_type = Type.u8,
                 .sentinel = null,
                 .@"align" = 0,
                 .@"addrspace" = .generic,
@@ -610,23 +588,6 @@ pub const Type = struct {
         if (a.legacy.tag_if_small_enough == b.legacy.tag_if_small_enough) return true;
 
         switch (a.tag()) {
-            .generic_poison => unreachable,
-
-            .bool,
-            .void,
-            .type,
-            .comptime_int,
-            .noreturn,
-            .null,
-            .undefined,
-            .anyopaque,
-            .@"anyframe",
-            .enum_literal,
-            => |a_tag| {
-                assert(a_tag != b.tag()); // because of the comparison at the top of the function.
-                return false;
-            },
-
             .u1,
             .u8,
             .i8,
@@ -653,10 +614,6 @@ pub const Type = struct {
                 const a_ies = a.castTag(.error_set_inferred).?.data;
                 const b_ies = (b.castTag(.error_set_inferred) orelse return false).data;
                 return a_ies == b_ies;
-            },
-
-            .anyerror => {
-                return b.tag() == .anyerror;
             },
 
             .error_set,
@@ -929,13 +886,6 @@ pub const Type = struct {
                 return true;
             },
 
-            // we can't compare these based on tags because it wouldn't detect if,
-            // for example, a was resolved into .@"struct" but b was one of these tags.
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            => unreachable, // needed to resolve the type before now
-
             .enum_full, .enum_nonexhaustive => {
                 const a_enum_obj = a.cast(Payload.EnumFull).?.data;
                 const b_enum_obj = (b.cast(Payload.EnumFull) orelse return false).data;
@@ -951,25 +901,12 @@ pub const Type = struct {
                 const b_enum_obj = (b.cast(Payload.EnumNumbered) orelse return false).data;
                 return a_enum_obj == b_enum_obj;
             },
-            // we can't compare these based on tags because it wouldn't detect if,
-            // for example, a was resolved into .enum_simple but b was one of these tags.
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            => unreachable, // needed to resolve the type before now
 
             .@"union", .union_safety_tagged, .union_tagged => {
                 const a_union_obj = a.cast(Payload.Union).?.data;
                 const b_union_obj = (b.cast(Payload.Union) orelse return false).data;
                 return a_union_obj == b_union_obj;
             },
-            // we can't compare these based on tags because it wouldn't detect if,
-            // for example, a was resolved into .union_tagged but b was one of these tags.
-            .type_info => unreachable, // needed to resolve the type before now
 
             .bound_fn => unreachable,
             .var_args_param => unreachable, // can be any type
@@ -991,31 +928,6 @@ pub const Type = struct {
             return;
         }
         switch (ty.tag()) {
-            .generic_poison => unreachable,
-
-            .bool => std.hash.autoHash(hasher, std.builtin.TypeId.Bool),
-            .void => std.hash.autoHash(hasher, std.builtin.TypeId.Void),
-            .type => std.hash.autoHash(hasher, std.builtin.TypeId.Type),
-            .comptime_int => std.hash.autoHash(hasher, std.builtin.TypeId.ComptimeInt),
-            .noreturn => std.hash.autoHash(hasher, std.builtin.TypeId.NoReturn),
-            .null => std.hash.autoHash(hasher, std.builtin.TypeId.Null),
-            .undefined => std.hash.autoHash(hasher, std.builtin.TypeId.Undefined),
-
-            .anyopaque => {
-                std.hash.autoHash(hasher, std.builtin.TypeId.Opaque);
-                std.hash.autoHash(hasher, Tag.anyopaque);
-            },
-
-            .@"anyframe" => {
-                std.hash.autoHash(hasher, std.builtin.TypeId.AnyFrame);
-                std.hash.autoHash(hasher, Tag.@"anyframe");
-            },
-
-            .enum_literal => {
-                std.hash.autoHash(hasher, std.builtin.TypeId.EnumLiteral);
-                std.hash.autoHash(hasher, Tag.enum_literal);
-            },
-
             .u1,
             .u8,
             .i8,
@@ -1048,12 +960,6 @@ pub const Type = struct {
                 std.hash.autoHash(hasher, names.len);
                 assert(std.sort.isSorted([]const u8, names, u8, std.mem.lessThan));
                 for (names) |name| hasher.update(name);
-            },
-
-            .anyerror => {
-                // anyerror is distinct from other error sets
-                std.hash.autoHash(hasher, std.builtin.TypeId.ErrorSet);
-                std.hash.autoHash(hasher, Tag.anyerror);
             },
 
             .error_set_inferred => {
@@ -1213,12 +1119,6 @@ pub const Type = struct {
                 }
             },
 
-            // we can't hash these based on tags because they wouldn't match the expanded version.
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            => unreachable, // needed to resolve the type before now
-
             .enum_full, .enum_nonexhaustive => {
                 const enum_obj: *const Module.EnumFull = ty.cast(Payload.EnumFull).?.data;
                 std.hash.autoHash(hasher, std.builtin.TypeId.Enum);
@@ -1234,23 +1134,12 @@ pub const Type = struct {
                 std.hash.autoHash(hasher, std.builtin.TypeId.Enum);
                 std.hash.autoHash(hasher, enum_obj);
             },
-            // we can't hash these based on tags because they wouldn't match the expanded version.
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            => unreachable, // needed to resolve the type before now
 
             .@"union", .union_safety_tagged, .union_tagged => {
                 const union_obj: *const Module.Union = ty.cast(Payload.Union).?.data;
                 std.hash.autoHash(hasher, std.builtin.TypeId.Union);
                 std.hash.autoHash(hasher, union_obj);
             },
-            // we can't hash these based on tags because they wouldn't match the expanded version.
-            .type_info => unreachable, // needed to resolve the type before now
 
             .bound_fn => unreachable,
             .var_args_param => unreachable, // can be any type
@@ -1311,19 +1200,9 @@ pub const Type = struct {
             .i64,
             .u128,
             .i128,
-            .anyopaque,
-            .bool,
-            .void,
-            .type,
-            .anyerror,
-            .comptime_int,
-            .noreturn,
-            .null,
-            .undefined,
             .single_const_pointer_to_comptime_int,
             .const_slice_u8,
             .const_slice_u8_sentinel_0,
-            .enum_literal,
             .anyerror_void_error_union,
             .inferred_alloc_const,
             .inferred_alloc_mut,
@@ -1332,19 +1211,6 @@ pub const Type = struct {
             .manyptr_u8,
             .manyptr_const_u8,
             .manyptr_const_u8_sentinel_0,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .type_info,
-            .@"anyframe",
-            .generic_poison,
             .bound_fn,
             => unreachable,
 
@@ -1588,21 +1454,9 @@ pub const Type = struct {
                 .i64,
                 .u128,
                 .i128,
-                .anyopaque,
-                .bool,
-                .void,
-                .type,
-                .anyerror,
-                .@"anyframe",
-                .comptime_int,
-                .noreturn,
                 .var_args_param,
                 .bound_fn,
                 => return writer.writeAll(@tagName(t)),
-
-                .enum_literal => return writer.writeAll("@Type(.EnumLiteral)"),
-                .null => return writer.writeAll("@Type(.Null)"),
-                .undefined => return writer.writeAll("@Type(.Undefined)"),
 
                 .empty_struct, .empty_struct_literal => return writer.writeAll("struct {}"),
 
@@ -1650,17 +1504,6 @@ pub const Type = struct {
                 .manyptr_u8 => return writer.writeAll("[*]u8"),
                 .manyptr_const_u8 => return writer.writeAll("[*]const u8"),
                 .manyptr_const_u8_sentinel_0 => return writer.writeAll("[*:0]const u8"),
-                .atomic_order => return writer.writeAll("std.builtin.AtomicOrder"),
-                .atomic_rmw_op => return writer.writeAll("std.builtin.AtomicRmwOp"),
-                .calling_convention => return writer.writeAll("std.builtin.CallingConvention"),
-                .address_space => return writer.writeAll("std.builtin.AddressSpace"),
-                .float_mode => return writer.writeAll("std.builtin.FloatMode"),
-                .reduce_op => return writer.writeAll("std.builtin.ReduceOp"),
-                .modifier => return writer.writeAll("std.builtin.CallModifier"),
-                .prefetch_options => return writer.writeAll("std.builtin.PrefetchOptions"),
-                .export_options => return writer.writeAll("std.builtin.ExportOptions"),
-                .extern_options => return writer.writeAll("std.builtin.ExternOptions"),
-                .type_info => return writer.writeAll("std.builtin.Type"),
                 .function => {
                     const payload = ty.castTag(.function).?.data;
                     try writer.writeAll("fn(");
@@ -1899,7 +1742,6 @@ pub const Type = struct {
                 },
                 .inferred_alloc_const => return writer.writeAll("(inferred_alloc_const)"),
                 .inferred_alloc_mut => return writer.writeAll("(inferred_alloc_mut)"),
-                .generic_poison => return writer.writeAll("(generic poison)"),
             }
             unreachable;
         }
@@ -1941,22 +1783,8 @@ pub const Type = struct {
         switch (t) {
             .inferred_alloc_const => unreachable,
             .inferred_alloc_mut => unreachable,
-            .generic_poison => unreachable,
             .var_args_param => unreachable,
             .bound_fn => unreachable,
-
-            // TODO get rid of these Type.Tag values.
-            .atomic_order => unreachable,
-            .atomic_rmw_op => unreachable,
-            .calling_convention => unreachable,
-            .address_space => unreachable,
-            .float_mode => unreachable,
-            .reduce_op => unreachable,
-            .modifier => unreachable,
-            .prefetch_options => unreachable,
-            .export_options => unreachable,
-            .extern_options => unreachable,
-            .type_info => unreachable,
 
             .u1,
             .u8,
@@ -1970,19 +1798,8 @@ pub const Type = struct {
             .i64,
             .u128,
             .i128,
-            .anyopaque,
-            .bool,
-            .void,
-            .type,
-            .anyerror,
-            .@"anyframe",
-            .comptime_int,
-            .noreturn,
             => try writer.writeAll(@tagName(t)),
 
-            .enum_literal => try writer.writeAll("@TypeOf(.enum_literal)"),
-            .null => try writer.writeAll("@TypeOf(null)"),
-            .undefined => try writer.writeAll("@TypeOf(undefined)"),
             .empty_struct_literal => try writer.writeAll("@TypeOf(.{})"),
 
             .empty_struct => {
@@ -2261,34 +2078,12 @@ pub const Type = struct {
             .i32 => return Value.initTag(.i32_type),
             .u64 => return Value.initTag(.u64_type),
             .i64 => return Value.initTag(.i64_type),
-            .anyopaque => return Value.initTag(.anyopaque_type),
-            .bool => return Value.initTag(.bool_type),
-            .void => return Value.initTag(.void_type),
-            .type => return Value.initTag(.type_type),
-            .anyerror => return Value.initTag(.anyerror_type),
-            .@"anyframe" => return Value.initTag(.anyframe_type),
-            .comptime_int => return Value.initTag(.comptime_int_type),
-            .noreturn => return Value.initTag(.noreturn_type),
-            .null => return Value.initTag(.null_type),
-            .undefined => return Value.initTag(.undefined_type),
             .single_const_pointer_to_comptime_int => return Value.initTag(.single_const_pointer_to_comptime_int_type),
             .const_slice_u8 => return Value.initTag(.const_slice_u8_type),
             .const_slice_u8_sentinel_0 => return Value.initTag(.const_slice_u8_sentinel_0_type),
-            .enum_literal => return Value.initTag(.enum_literal_type),
             .manyptr_u8 => return Value.initTag(.manyptr_u8_type),
             .manyptr_const_u8 => return Value.initTag(.manyptr_const_u8_type),
             .manyptr_const_u8_sentinel_0 => return Value.initTag(.manyptr_const_u8_sentinel_0_type),
-            .atomic_order => return Value.initTag(.atomic_order_type),
-            .atomic_rmw_op => return Value.initTag(.atomic_rmw_op_type),
-            .calling_convention => return Value.initTag(.calling_convention_type),
-            .address_space => return Value.initTag(.address_space_type),
-            .float_mode => return Value.initTag(.float_mode_type),
-            .reduce_op => return Value.initTag(.reduce_op_type),
-            .modifier => return Value.initTag(.modifier_type),
-            .prefetch_options => return Value.initTag(.prefetch_options_type),
-            .export_options => return Value.initTag(.export_options_type),
-            .extern_options => return Value.initTag(.extern_options_type),
-            .type_info => return Value.initTag(.type_info_type),
             .inferred_alloc_const => unreachable,
             .inferred_alloc_mut => unreachable,
             else => return Value.Tag.ty.create(allocator, self),
@@ -2389,8 +2184,7 @@ pub const Type = struct {
             .i64,
             .u128,
             .i128,
-            .bool,
-            .anyerror,
+
             .const_slice_u8,
             .const_slice_u8_sentinel_0,
             .array_u8_sentinel_0,
@@ -2399,18 +2193,7 @@ pub const Type = struct {
             .manyptr_u8,
             .manyptr_const_u8,
             .manyptr_const_u8_sentinel_0,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .@"anyframe",
-            .anyopaque,
+
             .@"opaque",
             .error_set_single,
             .error_union,
@@ -2446,16 +2229,8 @@ pub const Type = struct {
 
             // These are false because they are comptime-only types.
             .single_const_pointer_to_comptime_int,
-            .void,
-            .type,
-            .comptime_int,
-            .noreturn,
-            .null,
-            .undefined,
-            .enum_literal,
             .empty_struct,
             .empty_struct_literal,
-            .type_info,
             .bound_fn,
             // These are function *bodies*, not pointers.
             // Special exceptions have to be made when emitting functions due to
@@ -2571,7 +2346,6 @@ pub const Type = struct {
             .inferred_alloc_const => unreachable,
             .inferred_alloc_mut => unreachable,
             .var_args_param => unreachable,
-            .generic_poison => unreachable,
         }
     }
 
@@ -2652,8 +2426,7 @@ pub const Type = struct {
             .i64,
             .u128,
             .i128,
-            .bool,
-            .void,
+
             .manyptr_u8,
             .manyptr_const_u8,
             .manyptr_const_u8_sentinel_0,
@@ -2673,32 +2446,11 @@ pub const Type = struct {
             .optional_single_const_pointer,
             => true,
 
-            .anyopaque,
-            .anyerror,
-            .noreturn,
-            .null,
-            .@"anyframe",
-            .undefined,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
             .error_set,
             .error_set_single,
             .error_set_inferred,
             .error_set_merged,
             .@"opaque",
-            .generic_poison,
-            .type,
-            .comptime_int,
-            .enum_literal,
-            .type_info,
             // These are function bodies, not function pointers.
             .function,
             .const_slice_u8,
@@ -2786,7 +2538,6 @@ pub const Type = struct {
             else => return false,
 
             @enumToInt(InternPool.Index.none) => switch (ty.tag()) {
-                .noreturn => return true,
                 .error_set => {
                     const err_set_obj = ty.castTag(.error_set).?.data;
                     const names = err_set_obj.names.keys();
@@ -3015,21 +2766,10 @@ pub const Type = struct {
             .u1,
             .u8,
             .i8,
-            .bool,
+
             .array_u8_sentinel_0,
             .array_u8,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
             .@"opaque",
-            .anyopaque,
             => return AbiAlignmentAdvanced{ .scalar = 1 },
 
             // represents machine code; not a pointer
@@ -3056,13 +2796,11 @@ pub const Type = struct {
             .manyptr_u8,
             .manyptr_const_u8,
             .manyptr_const_u8_sentinel_0,
-            .@"anyframe",
             .anyframe_T,
             => return AbiAlignmentAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) },
 
             // TODO revisit this when we have the concept of the error tag type
             .anyerror_void_error_union,
-            .anyerror,
             .error_set_inferred,
             .error_set_single,
             .error_set,
@@ -3241,24 +2979,14 @@ pub const Type = struct {
             },
 
             .empty_struct,
-            .void,
             .empty_struct_literal,
-            .type,
-            .comptime_int,
-            .null,
-            .undefined,
-            .enum_literal,
-            .type_info,
             => return AbiAlignmentAdvanced{ .scalar = 0 },
 
-            .noreturn,
             .inferred_alloc_const,
             .inferred_alloc_mut,
             .var_args_param,
             .bound_fn,
             => unreachable,
-
-            .generic_poison => unreachable,
         }
     }
 
@@ -3436,27 +3164,13 @@ pub const Type = struct {
             .function => unreachable, // represents machine code; not a pointer
             .@"opaque" => unreachable, // no size available
             .bound_fn => unreachable,
-            .noreturn => unreachable,
             .inferred_alloc_const => unreachable,
             .inferred_alloc_mut => unreachable,
             .var_args_param => unreachable,
-            .generic_poison => unreachable,
-            .modifier => unreachable, // missing call to resolveTypeFields
-            .prefetch_options => unreachable, // missing call to resolveTypeFields
-            .export_options => unreachable, // missing call to resolveTypeFields
-            .extern_options => unreachable, // missing call to resolveTypeFields
-            .type_info => unreachable, // missing call to resolveTypeFields
 
-            .anyopaque,
-            .type,
-            .comptime_int,
-            .null,
-            .undefined,
-            .enum_literal,
             .single_const_pointer_to_comptime_int,
             .empty_struct_literal,
             .empty_struct,
-            .void,
             => return AbiSizeAdvanced{ .scalar = 0 },
 
             .@"struct", .tuple, .anon_struct => switch (ty.containerLayout()) {
@@ -3511,13 +3225,6 @@ pub const Type = struct {
             .u1,
             .u8,
             .i8,
-            .bool,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
             => return AbiSizeAdvanced{ .scalar = 1 },
 
             .array_u8 => return AbiSizeAdvanced{ .scalar = ty.castTag(.array_u8).?.data },
@@ -3567,7 +3274,6 @@ pub const Type = struct {
                 return AbiSizeAdvanced{ .scalar = result };
             },
 
-            .@"anyframe",
             .anyframe_T,
             .optional_single_const_pointer,
             .optional_single_mut_pointer,
@@ -3595,7 +3301,6 @@ pub const Type = struct {
 
             // TODO revisit this when we have the concept of the error tag type
             .anyerror_void_error_union,
-            .anyerror,
             .error_set_inferred,
             .error_set,
             .error_set_merged,
@@ -3798,13 +3503,6 @@ pub const Type = struct {
 
         switch (ty.tag()) {
             .function => unreachable, // represents machine code; not a pointer
-            .anyopaque => unreachable,
-            .type => unreachable,
-            .comptime_int => unreachable,
-            .noreturn => unreachable,
-            .null => unreachable,
-            .undefined => unreachable,
-            .enum_literal => unreachable,
             .single_const_pointer_to_comptime_int => unreachable,
             .empty_struct => unreachable,
             .empty_struct_literal => unreachable,
@@ -3812,11 +3510,9 @@ pub const Type = struct {
             .inferred_alloc_mut => unreachable,
             .@"opaque" => unreachable,
             .var_args_param => unreachable,
-            .generic_poison => unreachable,
             .bound_fn => unreachable,
 
-            .void => return 0,
-            .bool, .u1 => return 1,
+            .u1 => return 1,
             .u8, .i8 => return 8,
             .i16, .u16 => return 16,
             .u29 => return 29,
@@ -3891,9 +3587,7 @@ pub const Type = struct {
                 return payload.len * 8 * elem_size + elem_bit_size;
             },
 
-            .@"anyframe",
-            .anyframe_T,
-            => return target.cpu.arch.ptrBitWidth(),
+            .anyframe_T => return target.cpu.arch.ptrBitWidth(),
 
             .const_slice,
             .mut_slice,
@@ -3932,7 +3626,6 @@ pub const Type = struct {
             .error_set,
             .error_set_single,
             .anyerror_void_error_union,
-            .anyerror,
             .error_set_inferred,
             .error_set_merged,
             => return 16, // TODO revisit this when we have the concept of the error tag type
@@ -3942,19 +3635,6 @@ pub const Type = struct {
                 // includes padding bits.
                 return (try abiSizeAdvanced(ty, mod, strat)).scalar * 8;
             },
-
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .type_info,
-            => @panic("TODO at some point we gotta resolve builtin types"),
         }
     }
 
@@ -4342,7 +4022,7 @@ pub const Type = struct {
             .manyptr_const_u8_sentinel_0,
             => Type.u8,
 
-            .single_const_pointer_to_comptime_int => Type.initTag(.comptime_int),
+            .single_const_pointer_to_comptime_int => Type.comptime_int,
             .pointer => ty.castTag(.pointer).?.data.pointee_type,
 
             .var_args_param => ty,
@@ -4390,7 +4070,7 @@ pub const Type = struct {
             .manyptr_const_u8_sentinel_0,
             => Type.u8,
 
-            .single_const_pointer_to_comptime_int => Type.initTag(.comptime_int),
+            .single_const_pointer_to_comptime_int => Type.comptime_int,
             .pointer => {
                 const info = ty.castTag(.pointer).?.data;
                 const child_ty = info.pointee_type;
@@ -4405,7 +4085,6 @@ pub const Type = struct {
             .optional_single_const_pointer => ty.castPointer().?.data,
 
             .anyframe_T => ty.castTag(.anyframe_T).?.data,
-            .@"anyframe" => Type.void,
 
             else => unreachable,
         };
@@ -4486,19 +4165,6 @@ pub const Type = struct {
                 return union_obj.tag_ty;
             },
 
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .type_info,
-            => unreachable, // needed to call resolveTypeFields first
-
             else => null,
         };
     }
@@ -4512,19 +4178,6 @@ pub const Type = struct {
                 assert(union_obj.haveFieldTypes());
                 return union_obj.tag_ty;
             },
-
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .type_info,
-            => unreachable, // needed to call resolveTypeFields first
 
             else => null,
         };
@@ -4590,7 +4243,7 @@ pub const Type = struct {
     /// Asserts that the type is an error union.
     pub fn errorUnionPayload(self: Type) Type {
         return switch (self.tag()) {
-            .anyerror_void_error_union => Type.initTag(.void),
+            .anyerror_void_error_union => Type.void,
             .error_union => self.castTag(.error_union).?.data.payload,
             else => unreachable,
         };
@@ -4598,33 +4251,38 @@ pub const Type = struct {
 
     pub fn errorUnionSet(self: Type) Type {
         return switch (self.tag()) {
-            .anyerror_void_error_union => Type.initTag(.anyerror),
+            .anyerror_void_error_union => Type.anyerror,
             .error_union => self.castTag(.error_union).?.data.error_set,
             else => unreachable,
         };
     }
 
     /// Returns false for unresolved inferred error sets.
-    pub fn errorSetIsEmpty(ty: Type) bool {
-        switch (ty.tag()) {
-            .anyerror => return false,
-            .error_set_inferred => {
-                const inferred_error_set = ty.castTag(.error_set_inferred).?.data;
-                // Can't know for sure.
-                if (!inferred_error_set.is_resolved) return false;
-                if (inferred_error_set.is_anyerror) return false;
-                return inferred_error_set.errors.count() == 0;
+    pub fn errorSetIsEmpty(ty: Type, mod: *const Module) bool {
+        switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .error_set_inferred => {
+                    const inferred_error_set = ty.castTag(.error_set_inferred).?.data;
+                    // Can't know for sure.
+                    if (!inferred_error_set.is_resolved) return false;
+                    if (inferred_error_set.is_anyerror) return false;
+                    return inferred_error_set.errors.count() == 0;
+                },
+                .error_set_single => return false,
+                .error_set => {
+                    const err_set_obj = ty.castTag(.error_set).?.data;
+                    return err_set_obj.names.count() == 0;
+                },
+                .error_set_merged => {
+                    const name_map = ty.castTag(.error_set_merged).?.data;
+                    return name_map.count() == 0;
+                },
+                else => unreachable,
             },
-            .error_set_single => return false,
-            .error_set => {
-                const err_set_obj = ty.castTag(.error_set).?.data;
-                return err_set_obj.names.count() == 0;
+            .anyerror_type => return false,
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                else => @panic("TODO"),
             },
-            .error_set_merged => {
-                const name_map = ty.castTag(.error_set_merged).?.data;
-                return name_map.count() == 0;
-            },
-            else => unreachable,
         }
     }
 
@@ -4632,9 +4290,13 @@ pub const Type = struct {
     /// Note that the result may be a false negative if the type did not get error set
     /// resolution prior to this call.
     pub fn isAnyError(ty: Type) bool {
-        return switch (ty.tag()) {
-            .anyerror => true,
-            .error_set_inferred => ty.castTag(.error_set_inferred).?.data.is_anyerror,
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .error_set_inferred => ty.castTag(.error_set_inferred).?.data.is_anyerror,
+                else => false,
+            },
+            .anyerror_type => true,
+            // TODO handle error_set_inferred here
             else => false,
         };
     }
@@ -4806,72 +4468,75 @@ pub const Type = struct {
         const target = mod.getTarget();
         var ty = starting_ty;
 
-        if (ty.ip_index != .none) switch (mod.intern_pool.indexToKey(ty.ip_index)) {
-            .int_type => |int_type| return int_type,
-            .ptr_type => unreachable,
-            .array_type => unreachable,
-            .vector_type => @panic("TODO"),
-            .optional_type => unreachable,
-            .error_union_type => unreachable,
-            .simple_type => |t| switch (t) {
-                .usize => return .{ .signedness = .unsigned, .bits = target.cpu.arch.ptrBitWidth() },
-                .isize => return .{ .signedness = .signed, .bits = target.cpu.arch.ptrBitWidth() },
-                .c_char => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.char) },
-                .c_short => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.short) },
-                .c_ushort => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.ushort) },
-                .c_int => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.int) },
-                .c_uint => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.uint) },
-                .c_long => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.long) },
-                .c_ulong => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.ulong) },
-                .c_longlong => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.longlong) },
-                .c_ulonglong => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.ulonglong) },
+        while (true) switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .u1 => return .{ .signedness = .unsigned, .bits = 1 },
+                .u8 => return .{ .signedness = .unsigned, .bits = 8 },
+                .i8 => return .{ .signedness = .signed, .bits = 8 },
+                .u16 => return .{ .signedness = .unsigned, .bits = 16 },
+                .i16 => return .{ .signedness = .signed, .bits = 16 },
+                .u29 => return .{ .signedness = .unsigned, .bits = 29 },
+                .u32 => return .{ .signedness = .unsigned, .bits = 32 },
+                .i32 => return .{ .signedness = .signed, .bits = 32 },
+                .u64 => return .{ .signedness = .unsigned, .bits = 64 },
+                .i64 => return .{ .signedness = .signed, .bits = 64 },
+                .u128 => return .{ .signedness = .unsigned, .bits = 128 },
+                .i128 => return .{ .signedness = .signed, .bits = 128 },
+
+                .enum_full, .enum_nonexhaustive => ty = ty.cast(Payload.EnumFull).?.data.tag_ty,
+                .enum_numbered => ty = ty.castTag(.enum_numbered).?.data.tag_ty,
+                .enum_simple => {
+                    const enum_obj = ty.castTag(.enum_simple).?.data;
+                    const field_count = enum_obj.fields.count();
+                    if (field_count == 0) return .{ .signedness = .unsigned, .bits = 0 };
+                    return .{ .signedness = .unsigned, .bits = smallestUnsignedBits(field_count - 1) };
+                },
+
+                .error_set, .error_set_single, .error_set_inferred, .error_set_merged => {
+                    // TODO revisit this when error sets support custom int types
+                    return .{ .signedness = .unsigned, .bits = 16 };
+                },
+
+                .vector => ty = ty.castTag(.vector).?.data.elem_type,
+
+                .@"struct" => {
+                    const struct_obj = ty.castTag(.@"struct").?.data;
+                    assert(struct_obj.layout == .Packed);
+                    ty = struct_obj.backing_int_ty;
+                },
+
                 else => unreachable,
             },
-            .struct_type => @panic("TODO"),
-            .union_type => unreachable,
-            .simple_value => unreachable,
-            .extern_func => unreachable,
-            .int => unreachable,
-            .enum_tag => unreachable, // it's a value, not a type
-        };
-
-        while (true) switch (ty.tag()) {
-            .u1 => return .{ .signedness = .unsigned, .bits = 1 },
-            .u8 => return .{ .signedness = .unsigned, .bits = 8 },
-            .i8 => return .{ .signedness = .signed, .bits = 8 },
-            .u16 => return .{ .signedness = .unsigned, .bits = 16 },
-            .i16 => return .{ .signedness = .signed, .bits = 16 },
-            .u29 => return .{ .signedness = .unsigned, .bits = 29 },
-            .u32 => return .{ .signedness = .unsigned, .bits = 32 },
-            .i32 => return .{ .signedness = .signed, .bits = 32 },
-            .u64 => return .{ .signedness = .unsigned, .bits = 64 },
-            .i64 => return .{ .signedness = .signed, .bits = 64 },
-            .u128 => return .{ .signedness = .unsigned, .bits = 128 },
-            .i128 => return .{ .signedness = .signed, .bits = 128 },
-
-            .enum_full, .enum_nonexhaustive => ty = ty.cast(Payload.EnumFull).?.data.tag_ty,
-            .enum_numbered => ty = ty.castTag(.enum_numbered).?.data.tag_ty,
-            .enum_simple => {
-                const enum_obj = ty.castTag(.enum_simple).?.data;
-                const field_count = enum_obj.fields.count();
-                if (field_count == 0) return .{ .signedness = .unsigned, .bits = 0 };
-                return .{ .signedness = .unsigned, .bits = smallestUnsignedBits(field_count - 1) };
-            },
-
-            .error_set, .error_set_single, .anyerror, .error_set_inferred, .error_set_merged => {
+            .anyerror_type => {
                 // TODO revisit this when error sets support custom int types
                 return .{ .signedness = .unsigned, .bits = 16 };
             },
-
-            .vector => ty = ty.castTag(.vector).?.data.elem_type,
-
-            .@"struct" => {
-                const struct_obj = ty.castTag(.@"struct").?.data;
-                assert(struct_obj.layout == .Packed);
-                ty = struct_obj.backing_int_ty;
+            .usize_type => return .{ .signedness = .unsigned, .bits = target.cpu.arch.ptrBitWidth() },
+            .isize_type => return .{ .signedness = .signed, .bits = target.cpu.arch.ptrBitWidth() },
+            .c_char_type => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.char) },
+            .c_short_type => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.short) },
+            .c_ushort_type => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.ushort) },
+            .c_int_type => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.int) },
+            .c_uint_type => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.uint) },
+            .c_long_type => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.long) },
+            .c_ulong_type => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.ulong) },
+            .c_longlong_type => return .{ .signedness = .signed, .bits = target.c_type_bit_size(.longlong) },
+            .c_ulonglong_type => return .{ .signedness = .unsigned, .bits = target.c_type_bit_size(.ulonglong) },
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .int_type => |int_type| return int_type,
+                .ptr_type => unreachable,
+                .array_type => unreachable,
+                .vector_type => @panic("TODO"),
+                .optional_type => unreachable,
+                .error_union_type => unreachable,
+                .simple_type => unreachable, // handled via Index enum tag above
+                .struct_type => @panic("TODO"),
+                .union_type => unreachable,
+                .simple_value => unreachable,
+                .extern_func => unreachable,
+                .int => unreachable,
+                .enum_tag => unreachable,
             },
-
-            else => unreachable,
         };
     }
 
@@ -5039,7 +4704,6 @@ pub const Type = struct {
             else => false,
         };
         return switch (ty.tag()) {
-            .comptime_int,
             .u1,
             .u8,
             .i8,
@@ -5131,7 +4795,6 @@ pub const Type = struct {
         };
 
         while (true) switch (ty.tag()) {
-            .comptime_int,
             .u1,
             .u8,
             .i8,
@@ -5144,9 +4807,7 @@ pub const Type = struct {
             .i64,
             .u128,
             .i128,
-            .bool,
-            .type,
-            .anyerror,
+
             .error_union,
             .error_set_single,
             .error_set,
@@ -5159,10 +4820,8 @@ pub const Type = struct {
             .const_slice_u8_sentinel_0,
             .const_slice,
             .mut_slice,
-            .anyopaque,
             .optional_single_mut_pointer,
             .optional_single_const_pointer,
-            .enum_literal,
             .anyerror_void_error_union,
             .error_set_inferred,
             .@"opaque",
@@ -5170,18 +4829,6 @@ pub const Type = struct {
             .manyptr_u8,
             .manyptr_const_u8,
             .manyptr_const_u8_sentinel_0,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .type_info,
-            .@"anyframe",
             .anyframe_T,
             .many_const_pointer,
             .many_mut_pointer,
@@ -5277,10 +4924,6 @@ pub const Type = struct {
             },
 
             .empty_struct, .empty_struct_literal => return Value.initTag(.empty_struct_value),
-            .void => return Value.initTag(.void_value),
-            .noreturn => return Value.initTag(.unreachable_value),
-            .null => return Value.initTag(.null_value),
-            .undefined => return Value.initTag(.undef),
 
             .vector, .array, .array_u8 => {
                 if (ty.arrayLen() == 0)
@@ -5292,7 +4935,6 @@ pub const Type = struct {
 
             .inferred_alloc_const => unreachable,
             .inferred_alloc_mut => unreachable,
-            .generic_poison => unreachable,
         };
     }
 
@@ -5375,22 +5017,7 @@ pub const Type = struct {
             .i64,
             .u128,
             .i128,
-            .anyopaque,
-            .bool,
-            .void,
-            .anyerror,
-            .noreturn,
-            .@"anyframe",
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
+
             .manyptr_u8,
             .manyptr_const_u8,
             .manyptr_const_u8_sentinel_0,
@@ -5404,21 +5031,14 @@ pub const Type = struct {
             .error_set_inferred,
             .error_set_merged,
             .@"opaque",
-            .generic_poison,
             .array_u8,
             .array_u8_sentinel_0,
             .enum_simple,
             => false,
 
             .single_const_pointer_to_comptime_int,
-            .type,
-            .comptime_int,
-            .enum_literal,
-            .type_info,
             // These are function bodies, not function pointers.
             .function,
-            .null,
-            .undefined,
             => true,
 
             .var_args_param => unreachable,
@@ -5710,17 +5330,6 @@ pub const Type = struct {
             .enum_full, .enum_nonexhaustive => ty.cast(Payload.EnumFull).?.data.fields,
             .enum_simple => ty.castTag(.enum_simple).?.data.fields,
             .enum_numbered => ty.castTag(.enum_numbered).?.data.fields,
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            => @panic("TODO resolve std.builtin types"),
             else => unreachable,
         };
     }
@@ -5788,17 +5397,6 @@ pub const Type = struct {
                 const tag_ty = mod.intType(.unsigned, bits) catch @panic("TODO: handle OOM here");
                 return S.fieldWithRange(tag_ty, enum_tag, fields_len, mod);
             },
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            => @panic("TODO resolve std.builtin types"),
             else => unreachable,
         }
     }
@@ -6111,18 +5709,6 @@ pub const Type = struct {
                 const opaque_obj = ty.cast(Payload.Opaque).?.data;
                 return opaque_obj.srcLoc(mod);
             },
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .type_info,
-            => unreachable, // needed to call resolveTypeFields first
 
             else => return null,
         }
@@ -6159,29 +5745,17 @@ pub const Type = struct {
                 const opaque_obj = ty.cast(Payload.Opaque).?.data;
                 return opaque_obj.owner_decl;
             },
-            .atomic_order,
-            .atomic_rmw_op,
-            .calling_convention,
-            .address_space,
-            .float_mode,
-            .reduce_op,
-            .modifier,
-            .prefetch_options,
-            .export_options,
-            .extern_options,
-            .type_info,
-            => unreachable, // These need to be resolved earlier.
 
             else => return null,
         }
     }
 
     pub fn isGenericPoison(ty: Type) bool {
-        return switch (ty.ip_index) {
-            .generic_poison_type => true,
-            .none => ty.tag() == .generic_poison,
-            else => false,
-        };
+        return ty.ip_index == .generic_poison_type;
+    }
+
+    pub fn isVarArgsParam(ty: Type) bool {
+        return ty.ip_index == .none and ty.tag() == .var_args_param;
     }
 
     /// This enum does not directly correspond to `std.builtin.TypeId` because
@@ -6204,28 +5778,7 @@ pub const Type = struct {
         i64,
         u128,
         i128,
-        anyopaque,
-        bool,
-        void,
-        type,
-        anyerror,
-        comptime_int,
-        noreturn,
-        @"anyframe",
-        null,
-        undefined,
-        enum_literal,
-        atomic_order,
-        atomic_rmw_op,
-        calling_convention,
-        address_space,
-        float_mode,
-        reduce_op,
-        modifier,
-        prefetch_options,
-        export_options,
-        extern_options,
-        type_info,
+
         manyptr_u8,
         manyptr_const_u8,
         manyptr_const_u8_sentinel_0,
@@ -6233,7 +5786,6 @@ pub const Type = struct {
         const_slice_u8,
         const_slice_u8_sentinel_0,
         anyerror_void_error_union,
-        generic_poison,
         /// This is a special type for variadic parameters of a function call.
         /// Casts to it will validate that the type can be passed to a c calling convention function.
         var_args_param,
@@ -6305,21 +5857,11 @@ pub const Type = struct {
                 .i64,
                 .u128,
                 .i128,
-                .anyopaque,
-                .bool,
-                .void,
-                .type,
-                .anyerror,
-                .comptime_int,
-                .noreturn,
-                .enum_literal,
-                .null,
-                .undefined,
+
                 .single_const_pointer_to_comptime_int,
                 .anyerror_void_error_union,
                 .const_slice_u8,
                 .const_slice_u8_sentinel_0,
-                .generic_poison,
                 .inferred_alloc_const,
                 .inferred_alloc_mut,
                 .var_args_param,
@@ -6327,18 +5869,6 @@ pub const Type = struct {
                 .manyptr_u8,
                 .manyptr_const_u8,
                 .manyptr_const_u8_sentinel_0,
-                .atomic_order,
-                .atomic_rmw_op,
-                .calling_convention,
-                .address_space,
-                .float_mode,
-                .reduce_op,
-                .modifier,
-                .prefetch_options,
-                .export_options,
-                .extern_options,
-                .type_info,
-                .@"anyframe",
                 .bound_fn,
                 => @compileError("Type Tag " ++ @tagName(t) ++ " has no payload"),
 
@@ -6689,18 +6219,19 @@ pub const Type = struct {
     pub const @"f80": Type = .{ .ip_index = .f80_type, .legacy = undefined };
     pub const @"f128": Type = .{ .ip_index = .f128_type, .legacy = undefined };
 
-    pub const @"bool" = initTag(.bool);
+    pub const @"bool": Type = .{ .ip_index = .bool_type, .legacy = undefined };
     pub const @"usize": Type = .{ .ip_index = .usize_type, .legacy = undefined };
     pub const @"isize": Type = .{ .ip_index = .isize_type, .legacy = undefined };
     pub const @"comptime_int": Type = .{ .ip_index = .comptime_int_type, .legacy = undefined };
     pub const @"comptime_float": Type = .{ .ip_index = .comptime_float_type, .legacy = undefined };
-    pub const @"void" = initTag(.void);
-    pub const @"type" = initTag(.type);
-    pub const @"anyerror" = initTag(.anyerror);
-    pub const @"anyopaque" = initTag(.anyopaque);
-    pub const @"null" = initTag(.null);
-    pub const @"undefined" = initTag(.undefined);
-    pub const @"noreturn" = initTag(.noreturn);
+    pub const @"void": Type = .{ .ip_index = .void_type, .legacy = undefined };
+    pub const @"type": Type = .{ .ip_index = .type_type, .legacy = undefined };
+    pub const @"anyerror": Type = .{ .ip_index = .anyerror_type, .legacy = undefined };
+    pub const @"anyopaque": Type = .{ .ip_index = .anyopaque_type, .legacy = undefined };
+    pub const @"anyframe": Type = .{ .ip_index = .anyframe_type, .legacy = undefined };
+    pub const @"null": Type = .{ .ip_index = .null_type, .legacy = undefined };
+    pub const @"undefined": Type = .{ .ip_index = .undefined_type, .legacy = undefined };
+    pub const @"noreturn": Type = .{ .ip_index = .noreturn_type, .legacy = undefined };
 
     pub const @"c_char": Type = .{ .ip_index = .c_char_type, .legacy = undefined };
     pub const @"c_short": Type = .{ .ip_index = .c_short_type, .legacy = undefined };
@@ -6712,6 +6243,8 @@ pub const Type = struct {
     pub const @"c_longlong": Type = .{ .ip_index = .c_longlong_type, .legacy = undefined };
     pub const @"c_ulonglong": Type = .{ .ip_index = .c_ulonglong_type, .legacy = undefined };
     pub const @"c_longdouble": Type = .{ .ip_index = .c_longdouble_type, .legacy = undefined };
+
+    pub const generic_poison: Type = .{ .ip_index = .generic_poison_type, .legacy = undefined };
 
     pub const err_int = Type.u16;
 

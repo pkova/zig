@@ -3098,7 +3098,7 @@ fn airUnwrapErrUnionErr(self: *Self, inst: Air.Inst.Index) !void {
     const operand = try self.resolveInst(ty_op.operand);
 
     const result: MCValue = result: {
-        if (err_ty.errorSetIsEmpty()) {
+        if (err_ty.errorSetIsEmpty(mod)) {
             break :result MCValue{ .immediate = 0 };
         }
 
@@ -4911,7 +4911,7 @@ fn genUnOp(self: *Self, maybe_inst: ?Air.Inst.Index, tag: Air.Inst.Tag, src_air:
     switch (tag) {
         .not => {
             const limb_abi_size = @intCast(u16, @min(src_ty.abiSize(mod), 8));
-            const int_info = if (src_ty.tag() == .bool)
+            const int_info = if (src_ty.ip_index == .bool_type)
                 std.builtin.Type.Int{ .signedness = .unsigned, .bits = 1 }
             else
                 src_ty.intInfo(mod);
@@ -6947,7 +6947,7 @@ fn isNull(self: *Self, inst: Air.Inst.Index, opt_ty: Type, opt_mcv: MCValue) !MC
                 try self.asmRegisterRegister(.@"test", alias_reg, alias_reg);
                 return .{ .eflags = .z };
             }
-            assert(some_info.ty.tag() == .bool);
+            assert(some_info.ty.ip_index == .bool_type);
             const opt_abi_size = @intCast(u32, opt_ty.abiSize(mod));
             try self.asmRegisterImmediate(
                 .bt,
@@ -7039,7 +7039,7 @@ fn isErr(self: *Self, maybe_inst: ?Air.Inst.Index, ty: Type, operand: MCValue) !
     const mod = self.bin_file.options.module.?;
     const err_type = ty.errorUnionSet();
 
-    if (err_type.errorSetIsEmpty()) {
+    if (err_type.errorSetIsEmpty(mod)) {
         return MCValue{ .immediate = 0 }; // always false
     }
 

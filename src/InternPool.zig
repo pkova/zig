@@ -318,8 +318,10 @@ pub const Index = enum(u32) {
     type_info_type,
     manyptr_u8_type,
     manyptr_const_u8_type,
+    manyptr_const_u8_sentinel_0_type,
     single_const_pointer_to_comptime_int_type,
     const_slice_u8_type,
+    const_slice_u8_sentinel_0_type,
     anyerror_void_error_union_type,
     generic_poison_type,
     empty_struct_type,
@@ -330,6 +332,8 @@ pub const Index = enum(u32) {
     zero,
     /// `0` (usize)
     zero_usize,
+    /// `0` (u8)
+    zero_u8,
     /// `1` (comptime_int)
     one,
     /// `1` (usize)
@@ -488,8 +492,17 @@ pub const static_keys = [_]Key{
         .size = .Many,
     } },
 
+    // manyptr_const_u8_type
     .{ .ptr_type = .{
         .elem_type = .u8_type,
+        .size = .Many,
+        .is_const = true,
+    } },
+
+    // manyptr_const_u8_sentinel_0_type
+    .{ .ptr_type = .{
+        .elem_type = .u8_type,
+        .sentinel = .zero_u8,
         .size = .Many,
         .is_const = true,
     } },
@@ -500,12 +513,22 @@ pub const static_keys = [_]Key{
         .is_const = true,
     } },
 
+    // const_slice_u8_type
     .{ .ptr_type = .{
         .elem_type = .u8_type,
         .size = .Slice,
         .is_const = true,
     } },
 
+    // const_slice_u8_sentinel_0_type
+    .{ .ptr_type = .{
+        .elem_type = .u8_type,
+        .sentinel = .zero_u8,
+        .size = .Slice,
+        .is_const = true,
+    } },
+
+    // anyerror_void_error_union_type
     .{ .error_union_type = .{
         .error_set_type = .anyerror_type,
         .payload_type = .void_type,
@@ -529,6 +552,14 @@ pub const static_keys = [_]Key{
 
     .{ .int = .{
         .ty = .usize_type,
+        .big_int = .{
+            .limbs = &.{0},
+            .positive = true,
+        },
+    } },
+
+    .{ .int = .{
+        .ty = .u8_type,
         .big_int = .{
             .limbs = &.{0},
             .positive = true,

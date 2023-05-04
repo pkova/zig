@@ -586,7 +586,7 @@ pub const DeclGen = struct {
 
             switch (ty.zigTypeTag(mod)) {
                 .Int => try self.addInt(ty, val),
-                .Bool => try self.addConstBool(val.toBool()),
+                .Bool => try self.addConstBool(val.toBool(mod)),
                 .Array => switch (val.tag()) {
                     .aggregate => {
                         const elem_vals = val.castTag(.aggregate).?.data;
@@ -957,7 +957,7 @@ pub const DeclGen = struct {
             },
             .Bool => {
                 const operands = .{ .id_result_type = result_ty_id, .id_result = result_id };
-                if (val.toBool()) {
+                if (val.toBool(mod)) {
                     try section.emit(self.spv.gpa, .OpConstantTrue, operands);
                 } else {
                     try section.emit(self.spv.gpa, .OpConstantFalse, operands);

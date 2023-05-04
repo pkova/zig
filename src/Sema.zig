@@ -9399,7 +9399,7 @@ fn analyzeAs(
         false;
     const dest_ty = try sema.resolveType(block, src, zir_dest_type);
     const operand = try sema.resolveInst(zir_operand);
-    if (dest_ty.tag() == .var_args_param) return operand;
+    if (dest_ty.isVarArgsParam()) return operand;
     if (dest_ty.zigTypeTag(mod) == .NoReturn) {
         return sema.fail(block, src, "cannot cast to noreturn", .{});
     }
@@ -18311,7 +18311,7 @@ fn zirFieldType(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!A
     const ty_src = inst_data.src();
     const field_name_src: LazySrcLoc = .{ .node_offset_field_name = inst_data.src_node };
     const aggregate_ty = try sema.resolveType(block, ty_src, extra.container_type);
-    if (aggregate_ty.tag() == .var_args_param) return sema.addType(aggregate_ty);
+    if (aggregate_ty.isVarArgsParam()) return sema.addType(aggregate_ty);
     const field_name = sema.code.nullTerminatedString(extra.name_start);
     return sema.fieldType(block, aggregate_ty, field_name, field_name_src, ty_src);
 }

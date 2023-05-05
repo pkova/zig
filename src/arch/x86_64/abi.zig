@@ -76,7 +76,7 @@ pub fn classifySystemV(ty: Type, mod: *const Module, ctx: Context) [8]Class {
     };
     var result = [1]Class{.none} ** 8;
     switch (ty.zigTypeTag(mod)) {
-        .Pointer => switch (ty.ptrSize()) {
+        .Pointer => switch (ty.ptrSize(mod)) {
             .Slice => {
                 result[0] = .integer;
                 result[1] = .integer;
@@ -158,7 +158,7 @@ pub fn classifySystemV(ty: Type, mod: *const Module, ctx: Context) [8]Class {
             else => unreachable,
         },
         .Vector => {
-            const elem_ty = ty.childType();
+            const elem_ty = ty.childType(mod);
             if (ctx == .arg) {
                 const bit_size = ty.bitSize(mod);
                 if (bit_size > 128) {
@@ -187,7 +187,7 @@ pub fn classifySystemV(ty: Type, mod: *const Module, ctx: Context) [8]Class {
                     .none,    .none, .none, .none,
                 };
             }
-            const bits = elem_ty.bitSize(mod) * ty.arrayLen();
+            const bits = elem_ty.bitSize(mod) * ty.arrayLen(mod);
             if (bits <= 64) return .{
                 .sse,  .none, .none, .none,
                 .none, .none, .none, .none,

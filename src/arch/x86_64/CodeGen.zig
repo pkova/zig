@@ -1950,7 +1950,7 @@ fn allocFrameIndex(self: *Self, alloc: FrameAlloc) !FrameIndex {
 fn allocMemPtr(self: *Self, inst: Air.Inst.Index) !FrameIndex {
     const mod = self.bin_file.options.module.?;
     const ptr_ty = self.typeOfIndex(inst);
-    const val_ty = ptr_ty.childType();
+    const val_ty = ptr_ty.childType(mod);
     return self.allocFrameIndex(FrameAlloc.init(.{
         .size = math.cast(u32, val_ty.abiSize(mod)) orelse {
             return self.fail("type '{}' too big to fit into stack frame", .{val_ty.fmt(mod)});
@@ -3064,7 +3064,7 @@ fn airOptionalPayloadPtrSet(self: *Self, inst: Air.Inst.Index) !void {
     const result = result: {
         const dst_ty = self.typeOfIndex(inst);
         const src_ty = self.typeOf(ty_op.operand);
-        const opt_ty = src_ty.childType();
+        const opt_ty = src_ty.childType(mod);
         const src_mcv = try self.resolveInst(ty_op.operand);
 
         if (opt_ty.optionalReprIsPayload(mod)) {
@@ -3081,7 +3081,7 @@ fn airOptionalPayloadPtrSet(self: *Self, inst: Air.Inst.Index) !void {
         else
             try self.copyToRegisterWithInstTracking(inst, dst_ty, src_mcv);
 
-        const pl_ty = dst_ty.childType();
+        const pl_ty = dst_ty.childType(mod);
         const pl_abi_size = @intCast(i32, pl_ty.abiSize(mod));
         try self.genSetMem(.{ .reg = dst_mcv.register }, pl_abi_size, Type.bool, .{ .immediate = 1 });
         break :result if (self.liveness.isUnused(inst)) .unreach else dst_mcv;
@@ -3201,7 +3201,7 @@ fn airUnwrapErrUnionErrPtr(self: *Self, inst: Air.Inst.Index) !void {
     const dst_lock = self.register_manager.lockRegAssumeUnused(dst_reg);
     defer self.register_manager.unlockReg(dst_lock);
 
-    const eu_ty = src_ty.childType();
+    const eu_ty = src_ty.childType(mod);
     const pl_ty = eu_ty.errorUnionPayload();
     const err_ty = eu_ty.errorUnionSet();
     const err_off = @intCast(i32, errUnionErrorOffset(pl_ty, mod));
@@ -3241,7 +3241,7 @@ fn airUnwrapErrUnionPayloadPtr(self: *Self, inst: Air.Inst.Index) !void {
     const dst_lock = self.register_manager.lockReg(dst_reg);
     defer if (dst_lock) |lock| self.register_manager.unlockReg(lock);
 
-    const eu_ty = src_ty.childType();
+    const eu_ty = src_ty.childType(mod);
     const pl_ty = eu_ty.errorUnionPayload();
     const pl_off = @intCast(i32, errUnionPayloadOffset(pl_ty, mod));
     const dst_abi_size = @intCast(u32, dst_ty.abiSize(mod));
@@ -3267,7 +3267,7 @@ fn airErrUnionPayloadPtrSet(self: *Self, inst: Air.Inst.Index) !void {
         const src_lock = self.register_manager.lockRegAssumeUnused(src_reg);
         defer self.register_manager.unlockReg(src_lock);
 
-        const eu_ty = src_ty.childType();
+        const eu_ty = src_ty.childType(mod);
         const pl_ty = eu_ty.errorUnionPayload();
         const err_ty = eu_ty.errorUnionSet();
         const err_off = @intCast(i32, errUnionErrorOffset(pl_ty, mod));
@@ -3521,7 +3521,7 @@ fn genSliceElemPtr(self: *Self, lhs: Air.Inst.Ref, rhs: Air.Inst.Ref) !MCValue {
     };
     defer if (slice_mcv_lock) |lock| self.register_manager.unlockReg(lock);
 
-    const elem_ty = slice_ty.childType();
+    const elem_ty = slice_ty.childType(mod);
     const elem_size = elem_ty.abiSize(mod);
     var buf: Type.SlicePtrFieldTypeBuffer = undefined;
     const slice_ptr_field_type = slice_ty.slicePtrFieldType(&buf);
@@ -3580,7 +3580,7 @@ fn airArrayElemVal(self: *Self, inst: Air.Inst.Index) !void {
     };
     defer if (array_lock) |lock| self.register_manager.unlockReg(lock);
 
-    const elem_ty = array_ty.childType();
+    const elem_ty = array_ty.childType(mod);
     const elem_abi_size = elem_ty.abiSize(mod);
 
     const index_ty = self.typeOf(bin_op.rhs);
@@ -3708,7 +3708,7 @@ fn airSetUnionTag(self: *Self, inst: Air.Inst.Index) !void {
     const mod = self.bin_file.options.module.?;
     const bin_op = self.air.instructions.items(.data)[inst].bin_op;
     const ptr_union_ty = self.typeOf(bin_op.lhs);
-    const union_ty = ptr_union_ty.childType();
+    const union_ty = ptr_union_ty.childType(mod);
     const tag_ty = self.typeOf(bin_op.rhs);
     const layout = union_ty.unionGetLayout(mod);
 
@@ -3737,7 +3737,9 @@ fn airSetUnionTag(self: *Self, inst: Air.Inst.Index) !void {
         break :blk MCValue{ .register = reg };
     } else ptr;
 
-    var ptr_tag_pl = ptr_union_ty.ptrInfo();
+    var ptr_tag_pl: Type.Payload.Pointer = .{
+        .data = ptr_union_ty.ptrInfo(mod),
+    };
     ptr_tag_pl.data.pointee_type = tag_ty;
     const ptr_tag_ty = Type.initPayload(&ptr_tag_pl.base);
     try self.store(ptr_tag_ty, adjusted_ptr, tag);
@@ -4226,6 +4228,7 @@ fn airBitReverse(self: *Self, inst: Air.Inst.Index) !void {
 }
 
 fn airFloatSign(self: *Self, inst: Air.Inst.Index) !void {
+    const mod = self.bin_file.options.module.?;
     const un_op = self.air.instructions.items(.data)[inst].un_op;
     const ty = self.typeOf(un_op);
     const ty_bits = ty.floatBits(self.target.*);
@@ -4243,14 +4246,10 @@ fn airFloatSign(self: *Self, inst: Air.Inst.Index) !void {
     var stack align(@alignOf(ExpectedContents)) =
         std.heap.stackFallback(@sizeOf(ExpectedContents), arena.allocator());
 
-    var vec_pl = Type.Payload.Array{
-        .base = .{ .tag = .vector },
-        .data = .{
-            .len = @divExact(128, ty_bits),
-            .elem_type = ty,
-        },
-    };
-    const vec_ty = Type.initPayload(&vec_pl.base);
+    const vec_ty = try mod.vectorType(.{
+        .len = @divExact(128, ty_bits),
+        .child = ty.ip_index,
+    });
 
     var sign_pl = Value.Payload.SubValue{
         .base = .{ .tag = .repeated },
@@ -4363,7 +4362,7 @@ fn reuseOperandAdvanced(
 
 fn packedLoad(self: *Self, dst_mcv: MCValue, ptr_ty: Type, ptr_mcv: MCValue) InnerError!void {
     const mod = self.bin_file.options.module.?;
-    const ptr_info = ptr_ty.ptrInfo().data;
+    const ptr_info = ptr_ty.ptrInfo(mod);
 
     const val_ty = ptr_info.pointee_type;
     const val_abi_size = @intCast(u32, val_ty.abiSize(mod));
@@ -4431,7 +4430,8 @@ fn packedLoad(self: *Self, dst_mcv: MCValue, ptr_ty: Type, ptr_mcv: MCValue) Inn
 }
 
 fn load(self: *Self, dst_mcv: MCValue, ptr_ty: Type, ptr_mcv: MCValue) InnerError!void {
-    const dst_ty = ptr_ty.childType();
+    const mod = self.bin_file.options.module.?;
+    const dst_ty = ptr_ty.childType(mod);
     switch (ptr_mcv) {
         .none,
         .unreach,
@@ -4490,7 +4490,7 @@ fn airLoad(self: *Self, inst: Air.Inst.Index) !void {
         else
             try self.allocRegOrMem(inst, true);
 
-        if (ptr_ty.ptrInfo().data.host_size > 0) {
+        if (ptr_ty.ptrInfo(mod).host_size > 0) {
             try self.packedLoad(dst_mcv, ptr_ty, ptr_mcv);
         } else {
             try self.load(dst_mcv, ptr_ty, ptr_mcv);
@@ -4502,8 +4502,8 @@ fn airLoad(self: *Self, inst: Air.Inst.Index) !void {
 
 fn packedStore(self: *Self, ptr_ty: Type, ptr_mcv: MCValue, src_mcv: MCValue) InnerError!void {
     const mod = self.bin_file.options.module.?;
-    const ptr_info = ptr_ty.ptrInfo().data;
-    const src_ty = ptr_ty.childType();
+    const ptr_info = ptr_ty.ptrInfo(mod);
+    const src_ty = ptr_ty.childType(mod);
 
     const limb_abi_size: u16 = @min(ptr_info.host_size, 8);
     const limb_abi_bits = limb_abi_size * 8;
@@ -4563,7 +4563,8 @@ fn packedStore(self: *Self, ptr_ty: Type, ptr_mcv: MCValue, src_mcv: MCValue) In
 }
 
 fn store(self: *Self, ptr_ty: Type, ptr_mcv: MCValue, src_mcv: MCValue) InnerError!void {
-    const src_ty = ptr_ty.childType();
+    const mod = self.bin_file.options.module.?;
+    const src_ty = ptr_ty.childType(mod);
     switch (ptr_mcv) {
         .none,
         .unreach,
@@ -4598,6 +4599,7 @@ fn store(self: *Self, ptr_ty: Type, ptr_mcv: MCValue, src_mcv: MCValue) InnerErr
 }
 
 fn airStore(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
+    const mod = self.bin_file.options.module.?;
     if (safety) {
         // TODO if the value is undef, write 0xaa bytes to dest
     } else {
@@ -4607,7 +4609,7 @@ fn airStore(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
     const ptr_mcv = try self.resolveInst(bin_op.lhs);
     const ptr_ty = self.typeOf(bin_op.lhs);
     const src_mcv = try self.resolveInst(bin_op.rhs);
-    if (ptr_ty.ptrInfo().data.host_size > 0) {
+    if (ptr_ty.ptrInfo(mod).host_size > 0) {
         try self.packedStore(ptr_ty, ptr_mcv, src_mcv);
     } else {
         try self.store(ptr_ty, ptr_mcv, src_mcv);
@@ -4633,11 +4635,11 @@ fn fieldPtr(self: *Self, inst: Air.Inst.Index, operand: Air.Inst.Ref, index: u32
     const ptr_field_ty = self.typeOfIndex(inst);
     const mcv = try self.resolveInst(operand);
     const ptr_container_ty = self.typeOf(operand);
-    const container_ty = ptr_container_ty.childType();
+    const container_ty = ptr_container_ty.childType(mod);
     const field_offset = switch (container_ty.containerLayout()) {
         .Auto, .Extern => @intCast(u32, container_ty.structFieldOffset(index, mod)),
         .Packed => if (container_ty.zigTypeTag(mod) == .Struct and
-            ptr_field_ty.ptrInfo().data.host_size == 0)
+            ptr_field_ty.ptrInfo(mod).host_size == 0)
             container_ty.packedStructFieldByteOffset(index, mod)
         else
             0,
@@ -4860,7 +4862,7 @@ fn airFieldParentPtr(self: *Self, inst: Air.Inst.Index) !void {
     const extra = self.air.extraData(Air.FieldParentPtr, ty_pl.payload).data;
 
     const inst_ty = self.typeOfIndex(inst);
-    const parent_ty = inst_ty.childType();
+    const parent_ty = inst_ty.childType(mod);
     const field_offset = @intCast(i32, parent_ty.structFieldOffset(extra.field_index, mod));
 
     const src_mcv = try self.resolveInst(extra.field_ptr);
@@ -5953,11 +5955,7 @@ fn genBinOpMir(self: *Self, mir_tag: Mir.Inst.Tag, ty: Type, dst_mcv: MCValue, s
                         .load_got,
                         .load_tlv,
                         => {
-                            var ptr_pl = Type.Payload.ElemType{
-                                .base = .{ .tag = .single_const_pointer },
-                                .data = ty,
-                            };
-                            const ptr_ty = Type.initPayload(&ptr_pl.base);
+                            const ptr_ty = try mod.singleConstPtrType(ty);
                             const addr_reg = try self.copyToTmpRegister(ptr_ty, src_mcv.address());
                             return self.genBinOpMir(mir_tag, ty, dst_mcv, .{
                                 .indirect = .{ .reg = addr_reg },
@@ -6425,7 +6423,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
 
     const fn_ty = switch (ty.zigTypeTag(mod)) {
         .Fn => ty,
-        .Pointer => ty.childType(),
+        .Pointer => ty.childType(mod),
         else => unreachable,
     };
 
@@ -6737,10 +6735,11 @@ fn airTry(self: *Self, inst: Air.Inst.Index) !void {
 }
 
 fn airTryPtr(self: *Self, inst: Air.Inst.Index) !void {
+    const mod = self.bin_file.options.module.?;
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const extra = self.air.extraData(Air.TryPtr, ty_pl.payload);
     const body = self.air.extra[extra.end..][0..extra.data.body_len];
-    const err_union_ty = self.typeOf(extra.data.ptr).childType();
+    const err_union_ty = self.typeOf(extra.data.ptr).childType(mod);
     const result = try self.genTry(inst, extra.data.ptr, body, err_union_ty, true);
     return self.finishAir(inst, result, .{ .none, .none, .none });
 }
@@ -6914,8 +6913,7 @@ fn isNull(self: *Self, inst: Air.Inst.Index, opt_ty: Type, opt_mcv: MCValue) !MC
     try self.spillEflagsIfOccupied();
     self.eflags_inst = inst;
 
-    var pl_buf: Type.Payload.ElemType = undefined;
-    const pl_ty = opt_ty.optionalChild(&pl_buf);
+    const pl_ty = opt_ty.optionalChild(mod);
 
     var ptr_buf: Type.SlicePtrFieldTypeBuffer = undefined;
     const some_info: struct { off: i32, ty: Type } = if (opt_ty.optionalReprIsPayload(mod))
@@ -7006,9 +7004,8 @@ fn isNullPtr(self: *Self, inst: Air.Inst.Index, ptr_ty: Type, ptr_mcv: MCValue) 
     try self.spillEflagsIfOccupied();
     self.eflags_inst = inst;
 
-    const opt_ty = ptr_ty.childType();
-    var pl_buf: Type.Payload.ElemType = undefined;
-    const pl_ty = opt_ty.optionalChild(&pl_buf);
+    const opt_ty = ptr_ty.childType(mod);
+    const pl_ty = opt_ty.optionalChild(mod);
 
     var ptr_buf: Type.SlicePtrFieldTypeBuffer = undefined;
     const some_info: struct { off: i32, ty: Type } = if (opt_ty.optionalReprIsPayload(mod))
@@ -7140,6 +7137,7 @@ fn airIsErr(self: *Self, inst: Air.Inst.Index) !void {
 }
 
 fn airIsErrPtr(self: *Self, inst: Air.Inst.Index) !void {
+    const mod = self.bin_file.options.module.?;
     const un_op = self.air.instructions.items(.data)[inst].un_op;
 
     const operand_ptr = try self.resolveInst(un_op);
@@ -7160,7 +7158,7 @@ fn airIsErrPtr(self: *Self, inst: Air.Inst.Index) !void {
     const ptr_ty = self.typeOf(un_op);
     try self.load(operand, ptr_ty, operand_ptr);
 
-    const result = try self.isErr(inst, ptr_ty.childType(), operand);
+    const result = try self.isErr(inst, ptr_ty.childType(mod), operand);
 
     return self.finishAir(inst, result, .{ un_op, .none, .none });
 }
@@ -7174,6 +7172,7 @@ fn airIsNonErr(self: *Self, inst: Air.Inst.Index) !void {
 }
 
 fn airIsNonErrPtr(self: *Self, inst: Air.Inst.Index) !void {
+    const mod = self.bin_file.options.module.?;
     const un_op = self.air.instructions.items(.data)[inst].un_op;
 
     const operand_ptr = try self.resolveInst(un_op);
@@ -7194,7 +7193,7 @@ fn airIsNonErrPtr(self: *Self, inst: Air.Inst.Index) !void {
     const ptr_ty = self.typeOf(un_op);
     try self.load(operand, ptr_ty, operand_ptr);
 
-    const result = try self.isNonErr(inst, ptr_ty.childType(), operand);
+    const result = try self.isNonErr(inst, ptr_ty.childType(mod), operand);
 
     return self.finishAir(inst, result, .{ un_op, .none, .none });
 }
@@ -8223,8 +8222,8 @@ fn airArrayToSlice(self: *Self, inst: Air.Inst.Index) !void {
     const slice_ty = self.typeOfIndex(inst);
     const ptr_ty = self.typeOf(ty_op.operand);
     const ptr = try self.resolveInst(ty_op.operand);
-    const array_ty = ptr_ty.childType();
-    const array_len = array_ty.arrayLen();
+    const array_ty = ptr_ty.childType(mod);
+    const array_len = array_ty.arrayLen(mod);
 
     const frame_index = try self.allocFrameIndex(FrameAlloc.initType(slice_ty, mod));
     try self.genSetMem(.{ .frame = frame_index }, 0, ptr_ty, ptr);
@@ -8750,16 +8749,16 @@ fn airMemset(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
     const elem_abi_size = @intCast(u31, elem_ty.abiSize(mod));
 
     if (elem_abi_size == 1) {
-        const ptr: MCValue = switch (dst_ptr_ty.ptrSize()) {
+        const ptr: MCValue = switch (dst_ptr_ty.ptrSize(mod)) {
             // TODO: this only handles slices stored in the stack
             .Slice => dst_ptr,
             .One => dst_ptr,
             .C, .Many => unreachable,
         };
-        const len: MCValue = switch (dst_ptr_ty.ptrSize()) {
+        const len: MCValue = switch (dst_ptr_ty.ptrSize(mod)) {
             // TODO: this only handles slices stored in the stack
             .Slice => dst_ptr.address().offset(8).deref(),
-            .One => .{ .immediate = dst_ptr_ty.childType().arrayLen() },
+            .One => .{ .immediate = dst_ptr_ty.childType(mod).arrayLen(mod) },
             .C, .Many => unreachable,
         };
         const len_lock: ?RegisterLock = switch (len) {
@@ -8775,7 +8774,7 @@ fn airMemset(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
     // Store the first element, and then rely on memcpy copying forwards.
     // Length zero requires a runtime check - so we handle arrays specially
     // here to elide it.
-    switch (dst_ptr_ty.ptrSize()) {
+    switch (dst_ptr_ty.ptrSize(mod)) {
         .Slice => {
             var buf: Type.SlicePtrFieldTypeBuffer = undefined;
             const slice_ptr_ty = dst_ptr_ty.slicePtrFieldType(&buf);
@@ -8813,13 +8812,9 @@ fn airMemset(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
             try self.performReloc(skip_reloc);
         },
         .One => {
-            var elem_ptr_pl = Type.Payload.ElemType{
-                .base = .{ .tag = .single_mut_pointer },
-                .data = elem_ty,
-            };
-            const elem_ptr_ty = Type.initPayload(&elem_ptr_pl.base);
+            const elem_ptr_ty = try mod.singleMutPtrType(elem_ty);
 
-            const len = dst_ptr_ty.childType().arrayLen();
+            const len = dst_ptr_ty.childType(mod).arrayLen(mod);
 
             assert(len != 0); // prevented by Sema
             try self.store(elem_ptr_ty, dst_ptr, src_val);
@@ -8844,6 +8839,7 @@ fn airMemset(self: *Self, inst: Air.Inst.Index, safety: bool) !void {
 }
 
 fn airMemcpy(self: *Self, inst: Air.Inst.Index) !void {
+    const mod = self.bin_file.options.module.?;
     const bin_op = self.air.instructions.items(.data)[inst].bin_op;
 
     const dst_ptr = try self.resolveInst(bin_op.lhs);
@@ -8861,9 +8857,9 @@ fn airMemcpy(self: *Self, inst: Air.Inst.Index) !void {
     };
     defer if (src_ptr_lock) |lock| self.register_manager.unlockReg(lock);
 
-    const len: MCValue = switch (dst_ptr_ty.ptrSize()) {
+    const len: MCValue = switch (dst_ptr_ty.ptrSize(mod)) {
         .Slice => dst_ptr.address().offset(8).deref(),
-        .One => .{ .immediate = dst_ptr_ty.childType().arrayLen() },
+        .One => .{ .immediate = dst_ptr_ty.childType(mod).arrayLen(mod) },
         .C, .Many => unreachable,
     };
     const len_lock: ?RegisterLock = switch (len) {
@@ -9034,7 +9030,7 @@ fn airReduce(self: *Self, inst: Air.Inst.Index) !void {
 fn airAggregateInit(self: *Self, inst: Air.Inst.Index) !void {
     const mod = self.bin_file.options.module.?;
     const result_ty = self.typeOfIndex(inst);
-    const len = @intCast(usize, result_ty.arrayLen());
+    const len = @intCast(usize, result_ty.arrayLen(mod));
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
     const elements = @ptrCast([]const Air.Inst.Ref, self.air.extra[ty_pl.payload..][0..len]);
     const result: MCValue = result: {
@@ -9138,7 +9134,7 @@ fn airAggregateInit(self: *Self, inst: Air.Inst.Index) !void {
             .Array => {
                 const frame_index =
                     try self.allocFrameIndex(FrameAlloc.initType(result_ty, mod));
-                const elem_ty = result_ty.childType();
+                const elem_ty = result_ty.childType(mod);
                 const elem_size = @intCast(u32, elem_ty.abiSize(mod));
 
                 for (elements, 0..) |elem, elem_i| {

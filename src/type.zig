@@ -40,7 +40,7 @@ pub const Type = struct {
                 .ptr_type => return .Pointer,
                 .array_type => return .Array,
                 .vector_type => return .Vector,
-                .optional_type => return .Optional,
+                .opt_type => return .Optional,
                 .error_union_type => return .ErrorUnion,
                 .struct_type => return .Struct,
                 .union_type => return .Union,
@@ -117,38 +117,17 @@ pub const Type = struct {
             .function => return .Fn,
 
             .array,
-            .array_u8_sentinel_0,
-            .array_u8,
             .array_sentinel,
             => return .Array,
 
-            .vector => return .Vector,
-
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
             .pointer,
             .inferred_alloc_const,
             .inferred_alloc_mut,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
             => return .Pointer,
 
-            .optional,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            => return .Optional,
+            .optional => return .Optional,
 
-            .anyerror_void_error_union, .error_union => return .ErrorUnion,
+            .error_union => return .ErrorUnion,
 
             .anyframe_T => return .AnyFrame,
 
@@ -179,8 +158,7 @@ pub const Type = struct {
         return switch (self.zigTypeTag(mod)) {
             .ErrorUnion => self.errorUnionPayload().baseZigTypeTag(mod),
             .Optional => {
-                var buf: Payload.ElemType = undefined;
-                return self.optionalChild(&buf).baseZigTypeTag(mod);
+                return self.optionalChild(mod).baseZigTypeTag(mod);
             },
             else => |t| t,
         };
@@ -220,8 +198,7 @@ pub const Type = struct {
             .Pointer => !ty.isSlice(mod) and (is_equality_cmp or ty.isCPtr()),
             .Optional => {
                 if (!is_equality_cmp) return false;
-                var buf: Payload.ElemType = undefined;
-                return ty.optionalChild(&buf).isSelfComparable(mod, is_equality_cmp);
+                return ty.optionalChild(mod).isSelfComparable(mod, is_equality_cmp);
             },
         };
     }
@@ -277,9 +254,8 @@ pub const Type = struct {
     }
 
     pub fn castTag(self: Type, comptime t: Tag) ?*t.Type() {
-        if (self.ip_index != .none) {
-            return null;
-        }
+        assert(self.ip_index == .none);
+
         if (@enumToInt(self.legacy.tag_if_small_enough) < Tag.no_payload_count)
             return null;
 
@@ -289,281 +265,61 @@ pub const Type = struct {
         return null;
     }
 
-    pub fn castPointer(self: Type) ?*Payload.ElemType {
-        return switch (self.tag()) {
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => self.cast(Payload.ElemType),
-
-            .inferred_alloc_const => unreachable,
-            .inferred_alloc_mut => unreachable,
-
-            else => null,
-        };
-    }
-
     /// If it is a function pointer, returns the function type. Otherwise returns null.
     pub fn castPtrToFn(ty: Type, mod: *const Module) ?Type {
         if (ty.zigTypeTag(mod) != .Pointer) return null;
-        const elem_ty = ty.childType();
+        const elem_ty = ty.childType(mod);
         if (elem_ty.zigTypeTag(mod) != .Fn) return null;
         return elem_ty;
     }
 
-    pub fn ptrIsMutable(ty: Type) bool {
-        return switch (ty.tag()) {
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .single_const_pointer,
-            .many_const_pointer,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            .c_const_pointer,
-            .const_slice,
-            => false,
-
-            .single_mut_pointer,
-            .many_mut_pointer,
-            .manyptr_u8,
-            .c_mut_pointer,
-            .mut_slice,
-            => true,
-
-            .pointer => ty.castTag(.pointer).?.data.mutable,
-
-            else => unreachable,
+    pub fn ptrIsMutable(ty: Type, mod: *const Module) bool {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .pointer => ty.castTag(.pointer).?.data.mutable,
+                else => unreachable,
+            },
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .ptr_type => |ptr_type| !ptr_type.is_const,
+                else => unreachable,
+            },
         };
     }
 
-    pub const ArrayInfo = struct { elem_type: Type, sentinel: ?Value = null, len: u64 };
-    pub fn arrayInfo(self: Type) ArrayInfo {
+    pub const ArrayInfo = struct {
+        elem_type: Type,
+        sentinel: ?Value = null,
+        len: u64,
+    };
+
+    pub fn arrayInfo(self: Type, mod: *const Module) ArrayInfo {
         return .{
-            .len = self.arrayLen(),
-            .sentinel = self.sentinel(),
-            .elem_type = self.elemType(),
+            .len = self.arrayLen(mod),
+            .sentinel = self.sentinel(mod),
+            .elem_type = self.childType(mod),
         };
     }
 
-    pub fn ptrInfo(self: Type) Payload.Pointer {
-        switch (self.ip_index) {
-            .none => switch (self.tag()) {
-                .single_const_pointer_to_comptime_int => return .{ .data = .{
-                    .pointee_type = Type.comptime_int,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .One,
-                } },
-                .const_slice_u8 => return .{ .data = .{
-                    .pointee_type = Type.u8,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .Slice,
-                } },
-                .const_slice_u8_sentinel_0 => return .{ .data = .{
-                    .pointee_type = Type.u8,
-                    .sentinel = Value.zero,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .Slice,
-                } },
-                .single_const_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .One,
-                } },
-                .single_mut_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = true,
-                    .@"volatile" = false,
-                    .size = .One,
-                } },
-                .many_const_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .Many,
-                } },
-                .manyptr_const_u8 => return .{ .data = .{
-                    .pointee_type = Type.u8,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .Many,
-                } },
-                .manyptr_const_u8_sentinel_0 => return .{ .data = .{
-                    .pointee_type = Type.u8,
-                    .sentinel = Value.zero,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .Many,
-                } },
-                .many_mut_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = true,
-                    .@"volatile" = false,
-                    .size = .Many,
-                } },
-                .manyptr_u8 => return .{ .data = .{
-                    .pointee_type = Type.u8,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = true,
-                    .@"volatile" = false,
-                    .size = .Many,
-                } },
-                .c_const_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = true,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .C,
-                } },
-                .c_mut_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = true,
-                    .mutable = true,
-                    .@"volatile" = false,
-                    .size = .C,
-                } },
-                .const_slice => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .Slice,
-                } },
-                .mut_slice => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = true,
-                    .@"volatile" = false,
-                    .size = .Slice,
-                } },
-
-                .pointer => return self.castTag(.pointer).?.*,
-
-                .optional_single_mut_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = true,
-                    .@"volatile" = false,
-                    .size = .One,
-                } },
-                .optional_single_const_pointer => return .{ .data = .{
-                    .pointee_type = self.castPointer().?.data,
-                    .sentinel = null,
-                    .@"align" = 0,
-                    .@"addrspace" = .generic,
-                    .bit_offset = 0,
-                    .host_size = 0,
-                    .@"allowzero" = false,
-                    .mutable = false,
-                    .@"volatile" = false,
-                    .size = .One,
-                } },
-                .optional => {
-                    var buf: Payload.ElemType = undefined;
-                    const child_type = self.optionalChild(&buf);
-                    return child_type.ptrInfo();
+    pub fn ptrInfo(ty: Type, mod: *const Module) Payload.Pointer.Data {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .pointer => ty.castTag(.pointer).?.data,
+                .optional => b: {
+                    const child_type = ty.optionalChild(mod);
+                    break :b child_type.ptrInfo(mod);
                 },
 
                 else => unreachable,
             },
-            else => @panic("TODO"),
-        }
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .ptr_type => |p| Payload.Pointer.Data.fromKey(p),
+                .opt_type => |child| switch (mod.intern_pool.indexToKey(child)) {
+                    .ptr_type => |p| Payload.Pointer.Data.fromKey(p),
+                    else => unreachable,
+                },
+                else => unreachable,
+            },
+        };
     }
 
     pub fn eql(a: Type, b: Type, mod: *Module) bool {
@@ -660,20 +416,17 @@ pub const Type = struct {
             },
 
             .array,
-            .array_u8_sentinel_0,
-            .array_u8,
             .array_sentinel,
-            .vector,
             => {
                 if (a.zigTypeTag(mod) != b.zigTypeTag(mod)) return false;
 
-                if (a.arrayLen() != b.arrayLen())
+                if (a.arrayLen(mod) != b.arrayLen(mod))
                     return false;
-                const elem_ty = a.elemType();
-                if (!elem_ty.eql(b.elemType(), mod))
+                const elem_ty = a.childType(mod);
+                if (!elem_ty.eql(b.childType(mod), mod))
                     return false;
-                const sentinel_a = a.sentinel();
-                const sentinel_b = b.sentinel();
+                const sentinel_a = a.sentinel(mod);
+                const sentinel_b = b.sentinel(mod);
                 if (sentinel_a) |sa| {
                     if (sentinel_b) |sb| {
                         return sa.eql(sb, elem_ty, mod);
@@ -685,28 +438,14 @@ pub const Type = struct {
                 }
             },
 
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
             .pointer,
             .inferred_alloc_const,
             .inferred_alloc_mut,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
             => {
                 if (b.zigTypeTag(mod) != .Pointer) return false;
 
-                const info_a = a.ptrInfo().data;
-                const info_b = b.ptrInfo().data;
+                const info_a = a.ptrInfo(mod);
+                const info_b = b.ptrInfo(mod);
                 if (!info_a.pointee_type.eql(info_b.pointee_type, mod))
                     return false;
                 if (info_a.@"align" != info_b.@"align")
@@ -745,18 +484,13 @@ pub const Type = struct {
                 return true;
             },
 
-            .optional,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            => {
+            .optional => {
                 if (b.zigTypeTag(mod) != .Optional) return false;
 
-                var buf_a: Payload.ElemType = undefined;
-                var buf_b: Payload.ElemType = undefined;
-                return a.optionalChild(&buf_a).eql(b.optionalChild(&buf_b), mod);
+                return a.optionalChild(mod).eql(b.optionalChild(mod), mod);
             },
 
-            .anyerror_void_error_union, .error_union => {
+            .error_union => {
                 if (b.zigTypeTag(mod) != .ErrorUnion) return false;
 
                 const a_set = a.errorUnionSet();
@@ -952,47 +686,23 @@ pub const Type = struct {
             },
 
             .array,
-            .array_u8_sentinel_0,
-            .array_u8,
             .array_sentinel,
             => {
                 std.hash.autoHash(hasher, std.builtin.TypeId.Array);
 
-                const elem_ty = ty.elemType();
-                std.hash.autoHash(hasher, ty.arrayLen());
+                const elem_ty = ty.childType(mod);
+                std.hash.autoHash(hasher, ty.arrayLen(mod));
                 hashWithHasher(elem_ty, hasher, mod);
-                hashSentinel(ty.sentinel(), elem_ty, hasher, mod);
+                hashSentinel(ty.sentinel(mod), elem_ty, hasher, mod);
             },
 
-            .vector => {
-                std.hash.autoHash(hasher, std.builtin.TypeId.Vector);
-
-                const elem_ty = ty.elemType();
-                std.hash.autoHash(hasher, ty.vectorLen());
-                hashWithHasher(elem_ty, hasher, mod);
-            },
-
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
             .pointer,
             .inferred_alloc_const,
             .inferred_alloc_mut,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
             => {
                 std.hash.autoHash(hasher, std.builtin.TypeId.Pointer);
 
-                const info = ty.ptrInfo().data;
+                const info = ty.ptrInfo(mod);
                 hashWithHasher(info.pointee_type, hasher, mod);
                 hashSentinel(info.sentinel, info.pointee_type, hasher, mod);
                 std.hash.autoHash(hasher, info.@"align");
@@ -1006,17 +716,13 @@ pub const Type = struct {
                 std.hash.autoHash(hasher, info.size);
             },
 
-            .optional,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            => {
+            .optional => {
                 std.hash.autoHash(hasher, std.builtin.TypeId.Optional);
 
-                var buf: Payload.ElemType = undefined;
-                hashWithHasher(ty.optionalChild(&buf), hasher, mod);
+                hashWithHasher(ty.optionalChild(mod), hasher, mod);
             },
 
-            .anyerror_void_error_union, .error_union => {
+            .error_union => {
                 std.hash.autoHash(hasher, std.builtin.TypeId.ErrorUnion);
 
                 const set_ty = ty.errorUnionSet();
@@ -1028,7 +734,7 @@ pub const Type = struct {
 
             .anyframe_T => {
                 std.hash.autoHash(hasher, std.builtin.TypeId.AnyFrame);
-                hashWithHasher(ty.childType(), hasher, mod);
+                hashWithHasher(ty.childType(mod), hasher, mod);
             },
 
             .empty_struct => {
@@ -1137,35 +843,14 @@ pub const Type = struct {
                 .legacy = .{ .tag_if_small_enough = self.legacy.tag_if_small_enough },
             };
         } else switch (self.legacy.ptr_otherwise.tag) {
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .anyerror_void_error_union,
             .inferred_alloc_const,
             .inferred_alloc_mut,
             .var_args_param,
             .empty_struct_literal,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
             .bound_fn,
             => unreachable,
 
-            .array_u8,
-            .array_u8_sentinel_0,
-            => return self.copyPayloadShallow(allocator, Payload.Len),
-
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
             .optional,
-            .optional_single_mut_pointer,
-            .optional_single_const_pointer,
             .anyframe_T,
             => {
                 const payload = self.cast(Payload.ElemType).?;
@@ -1180,13 +865,6 @@ pub const Type = struct {
                 };
             },
 
-            .vector => {
-                const payload = self.castTag(.vector).?.data;
-                return Tag.vector.create(allocator, .{
-                    .len = payload.len,
-                    .elem_type = try payload.elem_type.copy(allocator),
-                });
-            },
             .array => {
                 const payload = self.castTag(.array).?.data;
                 return Tag.array.create(allocator, .{
@@ -1422,13 +1100,6 @@ pub const Type = struct {
                     });
                 },
 
-                .anyerror_void_error_union => return writer.writeAll("anyerror!void"),
-                .const_slice_u8 => return writer.writeAll("[]const u8"),
-                .const_slice_u8_sentinel_0 => return writer.writeAll("[:0]const u8"),
-                .single_const_pointer_to_comptime_int => return writer.writeAll("*const comptime_int"),
-                .manyptr_u8 => return writer.writeAll("[*]u8"),
-                .manyptr_const_u8 => return writer.writeAll("[*]const u8"),
-                .manyptr_const_u8_sentinel_0 => return writer.writeAll("[*:0]const u8"),
                 .function => {
                     const payload = ty.castTag(.function).?.data;
                     try writer.writeAll("fn(");
@@ -1460,20 +1131,6 @@ pub const Type = struct {
                     try writer.print("anyframe->", .{});
                     ty = return_type;
                     continue;
-                },
-                .array_u8 => {
-                    const len = ty.castTag(.array_u8).?.data;
-                    return writer.print("[{d}]u8", .{len});
-                },
-                .array_u8_sentinel_0 => {
-                    const len = ty.castTag(.array_u8_sentinel_0).?.data;
-                    return writer.print("[{d}:0]u8", .{len});
-                },
-                .vector => {
-                    const payload = ty.castTag(.vector).?.data;
-                    try writer.print("@Vector({d}, ", .{payload.len});
-                    try payload.elem_type.dump("", .{}, writer);
-                    return writer.writeAll(")");
                 },
                 .array => {
                     const payload = ty.castTag(.array).?.data;
@@ -1526,70 +1183,10 @@ pub const Type = struct {
                     try writer.writeAll("}");
                     return;
                 },
-                .single_const_pointer => {
-                    const pointee_type = ty.castTag(.single_const_pointer).?.data;
-                    try writer.writeAll("*const ");
-                    ty = pointee_type;
-                    continue;
-                },
-                .single_mut_pointer => {
-                    const pointee_type = ty.castTag(.single_mut_pointer).?.data;
-                    try writer.writeAll("*");
-                    ty = pointee_type;
-                    continue;
-                },
-                .many_const_pointer => {
-                    const pointee_type = ty.castTag(.many_const_pointer).?.data;
-                    try writer.writeAll("[*]const ");
-                    ty = pointee_type;
-                    continue;
-                },
-                .many_mut_pointer => {
-                    const pointee_type = ty.castTag(.many_mut_pointer).?.data;
-                    try writer.writeAll("[*]");
-                    ty = pointee_type;
-                    continue;
-                },
-                .c_const_pointer => {
-                    const pointee_type = ty.castTag(.c_const_pointer).?.data;
-                    try writer.writeAll("[*c]const ");
-                    ty = pointee_type;
-                    continue;
-                },
-                .c_mut_pointer => {
-                    const pointee_type = ty.castTag(.c_mut_pointer).?.data;
-                    try writer.writeAll("[*c]");
-                    ty = pointee_type;
-                    continue;
-                },
-                .const_slice => {
-                    const pointee_type = ty.castTag(.const_slice).?.data;
-                    try writer.writeAll("[]const ");
-                    ty = pointee_type;
-                    continue;
-                },
-                .mut_slice => {
-                    const pointee_type = ty.castTag(.mut_slice).?.data;
-                    try writer.writeAll("[]");
-                    ty = pointee_type;
-                    continue;
-                },
                 .optional => {
                     const child_type = ty.castTag(.optional).?.data;
                     try writer.writeByte('?');
                     ty = child_type;
-                    continue;
-                },
-                .optional_single_const_pointer => {
-                    const pointee_type = ty.castTag(.optional_single_const_pointer).?.data;
-                    try writer.writeAll("?*const ");
-                    ty = pointee_type;
-                    continue;
-                },
-                .optional_single_mut_pointer => {
-                    const pointee_type = ty.castTag(.optional_single_mut_pointer).?.data;
-                    try writer.writeAll("?*");
-                    ty = pointee_type;
                     continue;
                 },
 
@@ -1694,7 +1291,7 @@ pub const Type = struct {
             .ptr_type => @panic("TODO"),
             .array_type => @panic("TODO"),
             .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
+            .opt_type => @panic("TODO"),
             .error_union_type => @panic("TODO"),
             .simple_type => |s| return writer.writeAll(@tagName(s)),
             .struct_type => @panic("TODO"),
@@ -1748,14 +1345,6 @@ pub const Type = struct {
                 const decl = mod.declPtr(opaque_obj.owner_decl);
                 try decl.renderFullyQualifiedName(mod, writer);
             },
-
-            .anyerror_void_error_union => try writer.writeAll("anyerror!void"),
-            .const_slice_u8 => try writer.writeAll("[]const u8"),
-            .const_slice_u8_sentinel_0 => try writer.writeAll("[:0]const u8"),
-            .single_const_pointer_to_comptime_int => try writer.writeAll("*const comptime_int"),
-            .manyptr_u8 => try writer.writeAll("[*]u8"),
-            .manyptr_const_u8 => try writer.writeAll("[*]const u8"),
-            .manyptr_const_u8_sentinel_0 => try writer.writeAll("[*:0]const u8"),
 
             .error_set_inferred => {
                 const func = ty.castTag(.error_set_inferred).?.data.func;
@@ -1815,20 +1404,6 @@ pub const Type = struct {
                 try print(error_union.payload, writer, mod);
             },
 
-            .array_u8 => {
-                const len = ty.castTag(.array_u8).?.data;
-                try writer.print("[{d}]u8", .{len});
-            },
-            .array_u8_sentinel_0 => {
-                const len = ty.castTag(.array_u8_sentinel_0).?.data;
-                try writer.print("[{d}:0]u8", .{len});
-            },
-            .vector => {
-                const payload = ty.castTag(.vector).?.data;
-                try writer.print("@Vector({d}, ", .{payload.len});
-                try print(payload.elem_type, writer, mod);
-                try writer.writeAll(")");
-            },
             .array => {
                 const payload = ty.castTag(.array).?.data;
                 try writer.print("[{d}]", .{payload.len});
@@ -1881,17 +1456,8 @@ pub const Type = struct {
                 try writer.writeAll("}");
             },
 
-            .pointer,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            => {
-                const info = ty.ptrInfo().data;
+            .pointer => {
+                const info = ty.ptrInfo(mod);
 
                 if (info.sentinel) |s| switch (info.size) {
                     .One, .C => unreachable,
@@ -1936,16 +1502,6 @@ pub const Type = struct {
                 try writer.writeByte('?');
                 try print(child_type, writer, mod);
             },
-            .optional_single_mut_pointer => {
-                const pointee_type = ty.castTag(.optional_single_mut_pointer).?.data;
-                try writer.writeAll("?*");
-                try print(pointee_type, writer, mod);
-            },
-            .optional_single_const_pointer => {
-                const pointee_type = ty.castTag(.optional_single_const_pointer).?.data;
-                try writer.writeAll("?*const ");
-                try print(pointee_type, writer, mod);
-            },
             .anyframe_T => {
                 const return_type = ty.castTag(.anyframe_T).?.data;
                 try writer.print("anyframe->", .{});
@@ -1979,12 +1535,6 @@ pub const Type = struct {
     pub fn toValue(self: Type, allocator: Allocator) Allocator.Error!Value {
         if (self.ip_index != .none) return self.ip_index.toValue();
         switch (self.tag()) {
-            .single_const_pointer_to_comptime_int => return Value{ .ip_index = .single_const_pointer_to_comptime_int_type, .legacy = undefined },
-            .const_slice_u8 => return Value{ .ip_index = .const_slice_u8_type, .legacy = undefined },
-            .const_slice_u8_sentinel_0 => return Value{ .ip_index = .const_slice_u8_sentinel_0_type, .legacy = undefined },
-            .manyptr_u8 => return Value{ .ip_index = .manyptr_u8_type, .legacy = undefined },
-            .manyptr_const_u8 => return Value{ .ip_index = .manyptr_const_u8_type, .legacy = undefined },
-            .manyptr_const_u8_sentinel_0 => return Value{ .ip_index = .manyptr_const_u8_sentinel_0_type, .legacy = undefined },
             .inferred_alloc_const => unreachable,
             .inferred_alloc_mut => unreachable,
             else => return Value.Tag.ty.create(allocator, self),
@@ -2012,10 +1562,41 @@ pub const Type = struct {
     ) RuntimeBitsError!bool {
         if (ty.ip_index != .none) switch (mod.intern_pool.indexToKey(ty.ip_index)) {
             .int_type => |int_type| return int_type.bits != 0,
-            .ptr_type => @panic("TODO"),
-            .array_type => @panic("TODO"),
-            .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
+            .ptr_type => |ptr_type| {
+                // Pointers to zero-bit types still have a runtime address; however, pointers
+                // to comptime-only types do not, with the exception of function pointers.
+                if (ignore_comptime_only) return true;
+                const child_ty = ptr_type.elem_type.toType();
+                if (child_ty.zigTypeTag(mod) == .Fn) return !child_ty.fnInfo().is_generic;
+                if (strat == .sema) return !(try strat.sema.typeRequiresComptime(ty));
+                return !comptimeOnly(ty, mod);
+            },
+            .array_type => |array_type| {
+                if (array_type.sentinel != .none) {
+                    return array_type.child.toType().hasRuntimeBitsAdvanced(mod, ignore_comptime_only, strat);
+                } else {
+                    return array_type.len > 0 and
+                        try array_type.child.toType().hasRuntimeBitsAdvanced(mod, ignore_comptime_only, strat);
+                }
+            },
+            .vector_type => |vector_type| {
+                return vector_type.len > 0 and
+                    try vector_type.child.toType().hasRuntimeBitsAdvanced(mod, ignore_comptime_only, strat);
+            },
+            .opt_type => |child| {
+                const child_ty = child.toType();
+                if (child_ty.isNoReturn()) {
+                    // Then the optional is comptime-known to be null.
+                    return false;
+                }
+                if (ignore_comptime_only) {
+                    return true;
+                } else if (strat == .sema) {
+                    return !(try strat.sema.typeRequiresComptime(child_ty));
+                } else {
+                    return !comptimeOnly(child_ty, mod);
+                }
+            },
             .error_union_type => @panic("TODO"),
             .simple_type => |t| return switch (t) {
                 .f16,
@@ -2073,14 +1654,7 @@ pub const Type = struct {
             .enum_tag => unreachable, // it's a value, not a type
         };
         switch (ty.tag()) {
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .array_u8_sentinel_0,
-            .anyerror_void_error_union,
             .error_set_inferred,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
 
             .@"opaque",
             .error_set_single,
@@ -2092,22 +1666,12 @@ pub const Type = struct {
             // Pointers to zero-bit types still have a runtime address; however, pointers
             // to comptime-only types do not, with the exception of function pointers.
             .anyframe_T,
-            .optional_single_mut_pointer,
-            .optional_single_const_pointer,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
             .pointer,
             => {
                 if (ignore_comptime_only) {
                     return true;
-                } else if (ty.childType().zigTypeTag(mod) == .Fn) {
-                    return !ty.childType().fnInfo().is_generic;
+                } else if (ty.childType(mod).zigTypeTag(mod) == .Fn) {
+                    return !ty.childType(mod).fnInfo().is_generic;
                 } else if (strat == .sema) {
                     return !(try strat.sema.typeRequiresComptime(ty));
                 } else {
@@ -2116,7 +1680,6 @@ pub const Type = struct {
             },
 
             // These are false because they are comptime-only types.
-            .single_const_pointer_to_comptime_int,
             .empty_struct,
             .empty_struct_literal,
             .bound_fn,
@@ -2127,8 +1690,7 @@ pub const Type = struct {
             => return false,
 
             .optional => {
-                var buf: Payload.ElemType = undefined;
-                const child_ty = ty.optionalChild(&buf);
+                const child_ty = ty.optionalChild(mod);
                 if (child_ty.isNoReturn()) {
                     // Then the optional is comptime-known to be null.
                     return false;
@@ -2216,10 +1778,9 @@ pub const Type = struct {
                 }
             },
 
-            .array, .vector => return ty.arrayLen() != 0 and
-                try ty.elemType().hasRuntimeBitsAdvanced(mod, ignore_comptime_only, strat),
-            .array_u8 => return ty.arrayLen() != 0,
-            .array_sentinel => return ty.childType().hasRuntimeBitsAdvanced(mod, ignore_comptime_only, strat),
+            .array => return ty.arrayLen(mod) != 0 and
+                try ty.childType(mod).hasRuntimeBitsAdvanced(mod, ignore_comptime_only, strat),
+            .array_sentinel => return ty.childType(mod).hasRuntimeBitsAdvanced(mod, ignore_comptime_only, strat),
 
             .tuple, .anon_struct => {
                 const tuple = ty.tupleFields();
@@ -2241,14 +1802,14 @@ pub const Type = struct {
     /// readFrom/writeToMemory are supported only for types with a well-
     /// defined memory layout
     pub fn hasWellDefinedLayout(ty: Type, mod: *const Module) bool {
-        if (ty.ip_index != .none) switch (mod.intern_pool.indexToKey(ty.ip_index)) {
-            .int_type => return true,
-            .ptr_type => @panic("TODO"),
-            .array_type => @panic("TODO"),
-            .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
-            .error_union_type => @panic("TODO"),
-            .simple_type => |t| return switch (t) {
+        if (ty.ip_index != .none) return switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+            .int_type => true,
+            .ptr_type => true,
+            .array_type => |array_type| array_type.child.toType().hasWellDefinedLayout(mod),
+            .vector_type => true,
+            .opt_type => |child| child.toType().isPtrLikeOptional(mod),
+            .error_union_type => false,
+            .simple_type => |t| switch (t) {
                 .f16,
                 .f32,
                 .f64,
@@ -2302,23 +1863,8 @@ pub const Type = struct {
             .enum_tag => unreachable, // it's a value, not a type
         };
         return switch (ty.tag()) {
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            .array_u8,
-            .array_u8_sentinel_0,
             .pointer,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .single_const_pointer_to_comptime_int,
             .enum_numbered,
-            .vector,
-            .optional_single_mut_pointer,
-            .optional_single_const_pointer,
             => true,
 
             .error_set,
@@ -2328,13 +1874,8 @@ pub const Type = struct {
             .@"opaque",
             // These are function bodies, not function pointers.
             .function,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .const_slice,
-            .mut_slice,
             .enum_simple,
             .error_union,
-            .anyerror_void_error_union,
             .anyframe_T,
             .tuple,
             .anon_struct,
@@ -2353,7 +1894,7 @@ pub const Type = struct {
 
             .array,
             .array_sentinel,
-            => ty.childType().hasWellDefinedLayout(mod),
+            => ty.childType(mod).hasWellDefinedLayout(mod),
 
             .optional => ty.isPtrLikeOptional(mod),
             .@"struct" => ty.castTag(.@"struct").?.data.layout != .Auto,
@@ -2434,76 +1975,36 @@ pub const Type = struct {
     }
 
     pub fn ptrAlignmentAdvanced(ty: Type, mod: *const Module, opt_sema: ?*Sema) !u32 {
-        switch (ty.tag()) {
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            => {
-                const child_type = ty.cast(Payload.ElemType).?.data;
-                if (opt_sema) |sema| {
-                    const res = try child_type.abiAlignmentAdvanced(mod, .{ .sema = sema });
-                    return res.scalar;
-                }
-                return (child_type.abiAlignmentAdvanced(mod, .eager) catch unreachable).scalar;
+        switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .pointer => {
+                    const ptr_info = ty.castTag(.pointer).?.data;
+                    if (ptr_info.@"align" != 0) {
+                        return ptr_info.@"align";
+                    } else if (opt_sema) |sema| {
+                        const res = try ptr_info.pointee_type.abiAlignmentAdvanced(mod, .{ .sema = sema });
+                        return res.scalar;
+                    } else {
+                        return (ptr_info.pointee_type.abiAlignmentAdvanced(mod, .eager) catch unreachable).scalar;
+                    }
+                },
+                .optional => return ty.castTag(.optional).?.data.ptrAlignmentAdvanced(mod, opt_sema),
+
+                else => unreachable,
             },
-
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            => return 1,
-
-            .pointer => {
-                const ptr_info = ty.castTag(.pointer).?.data;
-                if (ptr_info.@"align" != 0) {
-                    return ptr_info.@"align";
-                } else if (opt_sema) |sema| {
-                    const res = try ptr_info.pointee_type.abiAlignmentAdvanced(mod, .{ .sema = sema });
-                    return res.scalar;
-                } else {
-                    return (ptr_info.pointee_type.abiAlignmentAdvanced(mod, .eager) catch unreachable).scalar;
-                }
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                else => @panic("TODO"),
             },
-            .optional => return ty.castTag(.optional).?.data.ptrAlignmentAdvanced(mod, opt_sema),
-
-            else => unreachable,
         }
     }
 
-    pub fn ptrAddressSpace(self: Type) std.builtin.AddressSpace {
+    pub fn ptrAddressSpace(self: Type, mod: *const Module) std.builtin.AddressSpace {
         return switch (self.tag()) {
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            .inferred_alloc_const,
-            .inferred_alloc_mut,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => .generic,
-
             .pointer => self.castTag(.pointer).?.data.@"addrspace",
 
             .optional => {
-                var buf: Payload.ElemType = undefined;
-                const child_type = self.optionalChild(&buf);
-                return child_type.ptrAddressSpace();
+                const child_type = self.optionalChild(mod);
+                return child_type.ptrAddressSpace(mod);
             },
 
             else => unreachable,
@@ -2547,15 +2048,31 @@ pub const Type = struct {
     ) Module.CompileError!AbiAlignmentAdvanced {
         const target = mod.getTarget();
 
+        const opt_sema = switch (strat) {
+            .sema => |sema| sema,
+            else => null,
+        };
+
         if (ty.ip_index != .none) switch (mod.intern_pool.indexToKey(ty.ip_index)) {
             .int_type => |int_type| {
                 if (int_type.bits == 0) return AbiAlignmentAdvanced{ .scalar = 0 };
                 return AbiAlignmentAdvanced{ .scalar = intAbiAlignment(int_type.bits, target) };
             },
-            .ptr_type => @panic("TODO"),
-            .array_type => @panic("TODO"),
-            .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
+            .ptr_type => {
+                return AbiAlignmentAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) };
+            },
+            .array_type => |array_type| {
+                return array_type.child.toType().abiAlignmentAdvanced(mod, strat);
+            },
+            .vector_type => |vector_type| {
+                const bits_u64 = try bitSizeAdvanced(vector_type.child.toType(), mod, opt_sema);
+                const bits = @intCast(u32, bits_u64);
+                const bytes = ((bits * vector_type.len) + 7) / 8;
+                const alignment = std.math.ceilPowerOfTwoAssert(u32, bytes);
+                return AbiAlignmentAdvanced{ .scalar = alignment };
+            },
+
+            .opt_type => @panic("TODO"),
             .error_union_type => @panic("TODO"),
             .simple_type => |t| switch (t) {
                 .bool,
@@ -2633,15 +2150,8 @@ pub const Type = struct {
             .enum_tag => unreachable, // it's a value, not a type
         };
 
-        const opt_sema = switch (strat) {
-            .sema => |sema| sema,
-            else => null,
-        };
         switch (ty.tag()) {
-            .array_u8_sentinel_0,
-            .array_u8,
-            .@"opaque",
-            => return AbiAlignmentAdvanced{ .scalar = 1 },
+            .@"opaque" => return AbiAlignmentAdvanced{ .scalar = 1 },
 
             // represents machine code; not a pointer
             .function => {
@@ -2650,47 +2160,21 @@ pub const Type = struct {
                 return AbiAlignmentAdvanced{ .scalar = target_util.defaultFunctionAlignment(target) };
             },
 
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
             .pointer,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
             .anyframe_T,
             => return AbiAlignmentAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) },
 
             // TODO revisit this when we have the concept of the error tag type
-            .anyerror_void_error_union,
             .error_set_inferred,
             .error_set_single,
             .error_set,
             .error_set_merged,
             => return AbiAlignmentAdvanced{ .scalar = 2 },
 
-            .array, .array_sentinel => return ty.elemType().abiAlignmentAdvanced(mod, strat),
-
-            .vector => {
-                const len = ty.arrayLen();
-                const bits = try bitSizeAdvanced(ty.elemType(), mod, opt_sema);
-                const bytes = ((bits * len) + 7) / 8;
-                const alignment = std.math.ceilPowerOfTwoAssert(u64, bytes);
-                return AbiAlignmentAdvanced{ .scalar = @intCast(u32, alignment) };
-            },
+            .array, .array_sentinel => return ty.childType(mod).abiAlignmentAdvanced(mod, strat),
 
             .optional => {
-                var buf: Payload.ElemType = undefined;
-                const child_type = ty.optionalChild(&buf);
+                const child_type = ty.optionalChild(mod);
 
                 switch (child_type.zigTypeTag(mod)) {
                     .Pointer => return AbiAlignmentAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) },
@@ -2951,8 +2435,29 @@ pub const Type = struct {
             },
             .ptr_type => @panic("TODO"),
             .array_type => @panic("TODO"),
-            .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
+            .vector_type => |vector_type| {
+                const opt_sema = switch (strat) {
+                    .sema => |sema| sema,
+                    .eager => null,
+                    .lazy => |arena| return AbiSizeAdvanced{
+                        .val = try Value.Tag.lazy_size.create(arena, ty),
+                    },
+                };
+                const elem_bits_u64 = try vector_type.child.toType().bitSizeAdvanced(mod, opt_sema);
+                const elem_bits = @intCast(u32, elem_bits_u64);
+                const total_bits = elem_bits * vector_type.len;
+                const total_bytes = (total_bits + 7) / 8;
+                const alignment = switch (try ty.abiAlignmentAdvanced(mod, strat)) {
+                    .scalar => |x| x,
+                    .val => return AbiSizeAdvanced{
+                        .val = try Value.Tag.lazy_size.create(strat.lazy, ty),
+                    },
+                };
+                const result = std.mem.alignForwardGeneric(u32, total_bytes, alignment);
+                return AbiSizeAdvanced{ .scalar = result };
+            },
+
+            .opt_type => @panic("TODO"),
             .error_union_type => @panic("TODO"),
             .simple_type => |t| switch (t) {
                 .bool,
@@ -3033,7 +2538,6 @@ pub const Type = struct {
             .inferred_alloc_mut => unreachable,
             .var_args_param => unreachable,
 
-            .single_const_pointer_to_comptime_int,
             .empty_struct_literal,
             .empty_struct,
             => return AbiSizeAdvanced{ .scalar = 0 },
@@ -3087,8 +2591,6 @@ pub const Type = struct {
                 return abiSizeAdvancedUnion(ty, mod, strat, union_obj, true);
             },
 
-            .array_u8 => return AbiSizeAdvanced{ .scalar = ty.castTag(.array_u8).?.data },
-            .array_u8_sentinel_0 => return AbiSizeAdvanced{ .scalar = ty.castTag(.array_u8_sentinel_0).?.data + 1 },
             .array => {
                 const payload = ty.castTag(.array).?.data;
                 switch (try payload.elem_type.abiSizeAdvanced(mod, strat)) {
@@ -3112,47 +2614,7 @@ pub const Type = struct {
                 }
             },
 
-            .vector => {
-                const payload = ty.castTag(.vector).?.data;
-                const opt_sema = switch (strat) {
-                    .sema => |sema| sema,
-                    .eager => null,
-                    .lazy => |arena| return AbiSizeAdvanced{
-                        .val = try Value.Tag.lazy_size.create(arena, ty),
-                    },
-                };
-                const elem_bits = try payload.elem_type.bitSizeAdvanced(mod, opt_sema);
-                const total_bits = elem_bits * payload.len;
-                const total_bytes = (total_bits + 7) / 8;
-                const alignment = switch (try ty.abiAlignmentAdvanced(mod, strat)) {
-                    .scalar => |x| x,
-                    .val => return AbiSizeAdvanced{
-                        .val = try Value.Tag.lazy_size.create(strat.lazy, ty),
-                    },
-                };
-                const result = std.mem.alignForwardGeneric(u64, total_bytes, alignment);
-                return AbiSizeAdvanced{ .scalar = result };
-            },
-
-            .anyframe_T,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => return AbiSizeAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) },
-
-            .const_slice,
-            .mut_slice,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            => return AbiSizeAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) * 2 },
+            .anyframe_T => return AbiSizeAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) },
 
             .pointer => switch (ty.castTag(.pointer).?.data.size) {
                 .Slice => return AbiSizeAdvanced{ .scalar = @divExact(target.cpu.arch.ptrBitWidth(), 8) * 2 },
@@ -3160,7 +2622,6 @@ pub const Type = struct {
             },
 
             // TODO revisit this when we have the concept of the error tag type
-            .anyerror_void_error_union,
             .error_set_inferred,
             .error_set,
             .error_set_merged,
@@ -3168,8 +2629,7 @@ pub const Type = struct {
             => return AbiSizeAdvanced{ .scalar = 2 },
 
             .optional => {
-                var buf: Payload.ElemType = undefined;
-                const child_type = ty.optionalChild(&buf);
+                const child_type = ty.optionalChild(mod);
 
                 if (child_type.isNoReturn()) {
                     return AbiSizeAdvanced{ .scalar = 0 };
@@ -3291,8 +2751,12 @@ pub const Type = struct {
             .int_type => |int_type| return int_type.bits,
             .ptr_type => @panic("TODO"),
             .array_type => @panic("TODO"),
-            .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
+            .vector_type => |vector_type| {
+                const child_ty = vector_type.child.toType();
+                const elem_bit_size = try bitSizeAdvanced(child_ty, mod, opt_sema);
+                return elem_bit_size * vector_type.len;
+            },
+            .opt_type => @panic("TODO"),
             .error_union_type => @panic("TODO"),
             .simple_type => |t| switch (t) {
                 .f16 => return 16,
@@ -3357,7 +2821,6 @@ pub const Type = struct {
 
         switch (ty.tag()) {
             .function => unreachable, // represents machine code; not a pointer
-            .single_const_pointer_to_comptime_int => unreachable,
             .empty_struct => unreachable,
             .empty_struct_literal => unreachable,
             .inferred_alloc_const => unreachable,
@@ -3408,13 +2871,6 @@ pub const Type = struct {
                 return size;
             },
 
-            .vector => {
-                const payload = ty.castTag(.vector).?.data;
-                const elem_bit_size = try bitSizeAdvanced(payload.elem_type, mod, opt_sema);
-                return elem_bit_size * payload.len;
-            },
-            .array_u8 => return 8 * ty.castTag(.array_u8).?.data,
-            .array_u8_sentinel_0 => return 8 * (ty.castTag(.array_u8_sentinel_0).?.data + 1),
             .array => {
                 const payload = ty.castTag(.array).?.data;
                 const elem_size = std.math.max(payload.elem_type.abiAlignment(mod), payload.elem_type.abiSize(mod));
@@ -3435,43 +2891,13 @@ pub const Type = struct {
 
             .anyframe_T => return target.cpu.arch.ptrBitWidth(),
 
-            .const_slice,
-            .mut_slice,
-            => return target.cpu.arch.ptrBitWidth() * 2,
-
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            => return target.cpu.arch.ptrBitWidth() * 2,
-
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            => {
-                return target.cpu.arch.ptrBitWidth();
-            },
-
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            => {
-                return target.cpu.arch.ptrBitWidth();
-            },
-
             .pointer => switch (ty.castTag(.pointer).?.data.size) {
                 .Slice => return target.cpu.arch.ptrBitWidth() * 2,
                 else => return target.cpu.arch.ptrBitWidth(),
             },
 
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => return target.cpu.arch.ptrBitWidth(),
-
             .error_set,
             .error_set_single,
-            .anyerror_void_error_union,
             .error_set_inferred,
             .error_set_merged,
             => return 16, // TODO revisit this when we have the concept of the error tag type
@@ -3501,12 +2927,11 @@ pub const Type = struct {
                 return true;
             },
             .Array => {
-                if (ty.arrayLenIncludingSentinel() == 0) return true;
-                return ty.childType().layoutIsResolved(mod);
+                if (ty.arrayLenIncludingSentinel(mod) == 0) return true;
+                return ty.childType(mod).layoutIsResolved(mod);
             },
             .Optional => {
-                var buf: Type.Payload.ElemType = undefined;
-                const payload_ty = ty.optionalChild(&buf);
+                const payload_ty = ty.optionalChild(mod);
                 return payload_ty.layoutIsResolved(mod);
             },
             .ErrorUnion => {
@@ -3520,9 +2945,6 @@ pub const Type = struct {
     pub fn isSinglePointer(ty: Type, mod: *const Module) bool {
         switch (ty.ip_index) {
             .none => return switch (ty.tag()) {
-                .single_const_pointer,
-                .single_mut_pointer,
-                .single_const_pointer_to_comptime_int,
                 .inferred_alloc_const,
                 .inferred_alloc_mut,
                 => true,
@@ -3539,54 +2961,33 @@ pub const Type = struct {
     }
 
     /// Asserts `ty` is a pointer.
-    pub fn ptrSize(ty: Type) std.builtin.Type.Pointer.Size {
-        return ptrSizeOrNull(ty).?;
+    pub fn ptrSize(ty: Type, mod: *const Module) std.builtin.Type.Pointer.Size {
+        return ptrSizeOrNull(ty, mod).?;
     }
 
     /// Returns `null` if `ty` is not a pointer.
-    pub fn ptrSizeOrNull(ty: Type) ?std.builtin.Type.Pointer.Size {
-        return switch (ty.tag()) {
-            .const_slice,
-            .mut_slice,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            => .Slice,
+    pub fn ptrSizeOrNull(ty: Type, mod: *const Module) ?std.builtin.Type.Pointer.Size {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .inferred_alloc_const,
+                .inferred_alloc_mut,
+                => .One,
 
-            .many_const_pointer,
-            .many_mut_pointer,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => .Many,
+                .pointer => ty.castTag(.pointer).?.data.size,
 
-            .c_const_pointer,
-            .c_mut_pointer,
-            => .C,
-
-            .single_const_pointer,
-            .single_mut_pointer,
-            .single_const_pointer_to_comptime_int,
-            .inferred_alloc_const,
-            .inferred_alloc_mut,
-            => .One,
-
-            .pointer => ty.castTag(.pointer).?.data.size,
-
-            else => null,
+                else => null,
+            },
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .ptr_type => |ptr_info| ptr_info.size,
+                else => null,
+            },
         };
     }
 
     pub fn isSlice(ty: Type, mod: *const Module) bool {
         return switch (ty.ip_index) {
             .none => switch (ty.tag()) {
-                .const_slice,
-                .mut_slice,
-                .const_slice_u8,
-                .const_slice_u8_sentinel_0,
-                => true,
-
                 .pointer => ty.castTag(.pointer).?.data.size == .Slice,
-
                 else => false,
             },
             else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
@@ -3603,78 +3004,28 @@ pub const Type = struct {
 
     pub fn slicePtrFieldType(self: Type, buffer: *SlicePtrFieldTypeBuffer) Type {
         switch (self.tag()) {
-            .const_slice_u8 => return Type.initTag(.manyptr_const_u8),
-            .const_slice_u8_sentinel_0 => return Type.initTag(.manyptr_const_u8_sentinel_0),
-
-            .const_slice => {
-                const elem_type = self.castTag(.const_slice).?.data;
-                buffer.* = .{
-                    .elem_type = .{
-                        .base = .{ .tag = .many_const_pointer },
-                        .data = elem_type,
-                    },
-                };
-                return Type.initPayload(&buffer.elem_type.base);
-            },
-            .mut_slice => {
-                const elem_type = self.castTag(.mut_slice).?.data;
-                buffer.* = .{
-                    .elem_type = .{
-                        .base = .{ .tag = .many_mut_pointer },
-                        .data = elem_type,
-                    },
-                };
-                return Type.initPayload(&buffer.elem_type.base);
-            },
-
             .pointer => {
                 const payload = self.castTag(.pointer).?.data;
                 assert(payload.size == .Slice);
 
-                if (payload.sentinel != null or
-                    payload.@"align" != 0 or
-                    payload.@"addrspace" != .generic or
-                    payload.bit_offset != 0 or
-                    payload.host_size != 0 or
-                    payload.vector_index != .none or
-                    payload.@"allowzero" or
-                    payload.@"volatile")
-                {
-                    buffer.* = .{
-                        .pointer = .{
-                            .data = .{
-                                .pointee_type = payload.pointee_type,
-                                .sentinel = payload.sentinel,
-                                .@"align" = payload.@"align",
-                                .@"addrspace" = payload.@"addrspace",
-                                .bit_offset = payload.bit_offset,
-                                .host_size = payload.host_size,
-                                .vector_index = payload.vector_index,
-                                .@"allowzero" = payload.@"allowzero",
-                                .mutable = payload.mutable,
-                                .@"volatile" = payload.@"volatile",
-                                .size = .Many,
-                            },
+                buffer.* = .{
+                    .pointer = .{
+                        .data = .{
+                            .pointee_type = payload.pointee_type,
+                            .sentinel = payload.sentinel,
+                            .@"align" = payload.@"align",
+                            .@"addrspace" = payload.@"addrspace",
+                            .bit_offset = payload.bit_offset,
+                            .host_size = payload.host_size,
+                            .vector_index = payload.vector_index,
+                            .@"allowzero" = payload.@"allowzero",
+                            .mutable = payload.mutable,
+                            .@"volatile" = payload.@"volatile",
+                            .size = .Many,
                         },
-                    };
-                    return Type.initPayload(&buffer.pointer.base);
-                } else if (payload.mutable) {
-                    buffer.* = .{
-                        .elem_type = .{
-                            .base = .{ .tag = .many_mut_pointer },
-                            .data = payload.pointee_type,
-                        },
-                    };
-                    return Type.initPayload(&buffer.elem_type.base);
-                } else {
-                    buffer.* = .{
-                        .elem_type = .{
-                            .base = .{ .tag = .many_const_pointer },
-                            .data = payload.pointee_type,
-                        },
-                    };
-                    return Type.initPayload(&buffer.elem_type.base);
-                }
+                    },
+                };
+                return Type.initPayload(&buffer.pointer.base);
             },
 
             else => unreachable,
@@ -3683,19 +3034,7 @@ pub const Type = struct {
 
     pub fn isConstPtr(self: Type) bool {
         return switch (self.tag()) {
-            .single_const_pointer,
-            .many_const_pointer,
-            .c_const_pointer,
-            .single_const_pointer_to_comptime_int,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .const_slice,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => true,
-
             .pointer => !self.castTag(.pointer).?.data.mutable,
-
             else => false,
         };
     }
@@ -3722,49 +3061,46 @@ pub const Type = struct {
 
     pub fn isCPtr(self: Type) bool {
         return switch (self.tag()) {
-            .c_const_pointer,
-            .c_mut_pointer,
-            => return true,
-
             .pointer => self.castTag(.pointer).?.data.size == .C,
 
             else => return false,
         };
     }
 
-    pub fn isPtrAtRuntime(self: Type, mod: *const Module) bool {
-        switch (self.tag()) {
-            .c_const_pointer,
-            .c_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            .manyptr_u8,
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            .single_const_pointer,
-            .single_const_pointer_to_comptime_int,
-            .single_mut_pointer,
-            => return true,
+    pub fn isPtrAtRuntime(ty: Type, mod: *const Module) bool {
+        switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .pointer => switch (ty.castTag(.pointer).?.data.size) {
+                    .Slice => return false,
+                    .One, .Many, .C => return true,
+                },
 
-            .pointer => switch (self.castTag(.pointer).?.data.size) {
-                .Slice => return false,
-                .One, .Many, .C => return true,
+                .optional => {
+                    const child_type = ty.optionalChild(mod);
+                    if (child_type.zigTypeTag(mod) != .Pointer) return false;
+                    const info = child_type.ptrInfo(mod);
+                    switch (info.size) {
+                        .Slice, .C => return false,
+                        .Many, .One => return !info.@"allowzero",
+                    }
+                },
+
+                else => return false,
             },
-
-            .optional => {
-                var buf: Payload.ElemType = undefined;
-                const child_type = self.optionalChild(&buf);
-                if (child_type.zigTypeTag(mod) != .Pointer) return false;
-                const info = child_type.ptrInfo().data;
-                switch (info.size) {
-                    .Slice, .C => return false,
-                    .Many, .One => return !info.@"allowzero",
-                }
+            else => return switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .ptr_type => |ptr_type| switch (ptr_type.size) {
+                    .Slice => false,
+                    .One, .Many, .C => true,
+                },
+                .opt_type => |child| switch (mod.intern_pool.indexToKey(child)) {
+                    .ptr_type => |p| switch (p.size) {
+                        .Slice, .C => false,
+                        .Many, .One => !p.is_allowzero,
+                    },
+                    else => false,
+                },
+                else => false,
             },
-
-            else => return false,
         }
     }
 
@@ -3774,23 +3110,17 @@ pub const Type = struct {
         if (ty.isPtrLikeOptional(mod)) {
             return true;
         }
-        return ty.ptrInfo().data.@"allowzero";
+        return ty.ptrInfo(mod).@"allowzero";
     }
 
     /// See also `isPtrLikeOptional`.
     pub fn optionalReprIsPayload(ty: Type, mod: *const Module) bool {
         switch (ty.tag()) {
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            => return true,
-
             .optional => {
                 const child_ty = ty.castTag(.optional).?.data;
                 switch (child_ty.zigTypeTag(mod)) {
                     .Pointer => {
-                        const info = child_ty.ptrInfo().data;
+                        const info = child_ty.ptrInfo(mod);
                         switch (info.size) {
                             .C => return false,
                             .Slice, .Many, .One => return !info.@"allowzero",
@@ -3813,7 +3143,7 @@ pub const Type = struct {
     pub fn isPtrLikeOptional(ty: Type, mod: *const Module) bool {
         if (ty.ip_index != .none) return switch (mod.intern_pool.indexToKey(ty.ip_index)) {
             .ptr_type => |ptr_type| ptr_type.size == .C,
-            .optional_type => |o| switch (mod.intern_pool.indexToKey(o.payload_type)) {
+            .opt_type => |child| switch (mod.intern_pool.indexToKey(child)) {
                 .ptr_type => |ptr_type| switch (ptr_type.size) {
                     .Slice, .C => false,
                     .Many, .One => !ptr_type.is_allowzero,
@@ -3823,16 +3153,10 @@ pub const Type = struct {
             else => false,
         };
         switch (ty.tag()) {
-            .optional_single_const_pointer,
-            .optional_single_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            => return true,
-
             .optional => {
                 const child_ty = ty.castTag(.optional).?.data;
                 if (child_ty.zigTypeTag(mod) != .Pointer) return false;
-                const info = child_ty.ptrInfo().data;
+                const info = child_ty.ptrInfo(mod);
                 switch (info.size) {
                     .Slice, .C => return false,
                     .Many, .One => return !info.@"allowzero",
@@ -3848,44 +3172,25 @@ pub const Type = struct {
     /// For *[N]T,  returns [N]T.
     /// For *T,     returns T.
     /// For [*]T,   returns T.
-    pub fn childType(ty: Type) Type {
-        return switch (ty.tag()) {
-            .vector => ty.castTag(.vector).?.data.elem_type,
-            .array => ty.castTag(.array).?.data.elem_type,
-            .array_sentinel => ty.castTag(.array_sentinel).?.data.elem_type,
-            .optional_single_mut_pointer,
-            .optional_single_const_pointer,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            => ty.castPointer().?.data,
-
-            .array_u8,
-            .array_u8_sentinel_0,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => Type.u8,
-
-            .single_const_pointer_to_comptime_int => Type.comptime_int,
-            .pointer => ty.castTag(.pointer).?.data.pointee_type,
-
-            .var_args_param => ty,
-
-            else => unreachable,
-        };
+    pub fn childType(ty: Type, mod: *const Module) Type {
+        return childTypeIp(ty, mod.intern_pool);
     }
 
-    /// Asserts the type is a pointer or array type.
-    /// TODO this is deprecated in favor of `childType`.
-    pub const elemType = childType;
+    pub fn childTypeIp(ty: Type, ip: InternPool) Type {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .array => ty.castTag(.array).?.data.elem_type,
+                .array_sentinel => ty.castTag(.array_sentinel).?.data.elem_type,
+
+                .pointer => ty.castTag(.pointer).?.data.pointee_type,
+
+                .var_args_param => ty,
+
+                else => unreachable,
+            },
+            else => ip.childType(ty.ip_index).toType(),
+        };
+    }
 
     /// For *[N]T,       returns T.
     /// For ?*T,         returns T.
@@ -3897,54 +3202,42 @@ pub const Type = struct {
     /// For []T,         returns T.
     /// For anyframe->T, returns T.
     pub fn elemType2(ty: Type, mod: *const Module) Type {
-        return switch (ty.tag()) {
-            .vector => ty.castTag(.vector).?.data.elem_type,
-            .array => ty.castTag(.array).?.data.elem_type,
-            .array_sentinel => ty.castTag(.array_sentinel).?.data.elem_type,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            => ty.castPointer().?.data,
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .array => ty.castTag(.array).?.data.elem_type,
+                .array_sentinel => ty.castTag(.array_sentinel).?.data.elem_type,
 
-            .single_const_pointer,
-            .single_mut_pointer,
-            => ty.castPointer().?.data.shallowElemType(mod),
+                .pointer => {
+                    const info = ty.castTag(.pointer).?.data;
+                    const child_ty = info.pointee_type;
+                    if (info.size == .One) {
+                        return child_ty.shallowElemType(mod);
+                    } else {
+                        return child_ty;
+                    }
+                },
+                .optional => ty.castTag(.optional).?.data.childType(mod),
 
-            .array_u8,
-            .array_u8_sentinel_0,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            => Type.u8,
+                .anyframe_T => ty.castTag(.anyframe_T).?.data,
 
-            .single_const_pointer_to_comptime_int => Type.comptime_int,
-            .pointer => {
-                const info = ty.castTag(.pointer).?.data;
-                const child_ty = info.pointee_type;
-                if (info.size == .One) {
-                    return child_ty.shallowElemType(mod);
-                } else {
-                    return child_ty;
-                }
+                else => unreachable,
             },
-            .optional => ty.castTag(.optional).?.data.childType(),
-            .optional_single_mut_pointer => ty.castPointer().?.data,
-            .optional_single_const_pointer => ty.castPointer().?.data,
-
-            .anyframe_T => ty.castTag(.anyframe_T).?.data,
-
-            else => unreachable,
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .ptr_type => |ptr_type| switch (ptr_type.size) {
+                    .One => ptr_type.elem_type.toType().shallowElemType(mod),
+                    .Many, .C, .Slice => ptr_type.elem_type.toType(),
+                },
+                .vector_type => |vector_type| vector_type.child.toType(),
+                .array_type => |array_type| array_type.child.toType(),
+                .opt_type => |child| mod.intern_pool.childType(child).toType(),
+                else => unreachable,
+            },
         };
     }
 
     fn shallowElemType(child_ty: Type, mod: *const Module) Type {
         return switch (child_ty.zigTypeTag(mod)) {
-            .Array, .Vector => child_ty.childType(),
+            .Array, .Vector => child_ty.childType(mod),
             else => child_ty,
         };
     }
@@ -3952,7 +3245,7 @@ pub const Type = struct {
     /// For vectors, returns the element type. Otherwise returns self.
     pub fn scalarType(ty: Type, mod: *const Module) Type {
         return switch (ty.zigTypeTag(mod)) {
-            .Vector => ty.childType(),
+            .Vector => ty.childType(mod),
             else => ty,
         };
     }
@@ -3960,51 +3253,25 @@ pub const Type = struct {
     /// Asserts that the type is an optional.
     /// Resulting `Type` will have inner memory referencing `buf`.
     /// Note that for C pointers this returns the type unmodified.
-    pub fn optionalChild(ty: Type, buf: *Payload.ElemType) Type {
-        return switch (ty.tag()) {
-            .optional => ty.castTag(.optional).?.data,
-            .optional_single_mut_pointer => {
-                buf.* = .{
-                    .base = .{ .tag = .single_mut_pointer },
-                    .data = ty.castPointer().?.data,
-                };
-                return Type.initPayload(&buf.base);
-            },
-            .optional_single_const_pointer => {
-                buf.* = .{
-                    .base = .{ .tag = .single_const_pointer },
-                    .data = ty.castPointer().?.data,
-                };
-                return Type.initPayload(&buf.base);
-            },
+    pub fn optionalChild(ty: Type, mod: *const Module) Type {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .optional => ty.castTag(.optional).?.data,
 
-            .pointer, // here we assume it is a C pointer
-            .c_const_pointer,
-            .c_mut_pointer,
-            => return ty,
+                .pointer, // here we assume it is a C pointer
+                => return ty,
 
-            else => unreachable,
+                else => unreachable,
+            },
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .opt_type => |child| child.toType(),
+                .ptr_type => |ptr_type| b: {
+                    assert(ptr_type.size == .C);
+                    break :b ty;
+                },
+                else => unreachable,
+            },
         };
-    }
-
-    /// Asserts that the type is an optional.
-    /// Same as `optionalChild` but allocates the buffer if needed.
-    pub fn optionalChildAlloc(ty: Type, allocator: Allocator) !Type {
-        switch (ty.tag()) {
-            .optional => return ty.castTag(.optional).?.data,
-            .optional_single_mut_pointer => {
-                return Tag.single_mut_pointer.create(allocator, ty.castPointer().?.data);
-            },
-            .optional_single_const_pointer => {
-                return Tag.single_const_pointer.create(allocator, ty.castPointer().?.data);
-            },
-            .pointer, // here we assume it is a C pointer
-            .c_const_pointer,
-            .c_mut_pointer,
-            => return ty,
-
-            else => unreachable,
-        }
     }
 
     /// Returns the tag type of a union, if the type is a union and it has a tag type.
@@ -4093,19 +3360,25 @@ pub const Type = struct {
     }
 
     /// Asserts that the type is an error union.
-    pub fn errorUnionPayload(self: Type) Type {
-        return switch (self.tag()) {
-            .anyerror_void_error_union => Type.void,
-            .error_union => self.castTag(.error_union).?.data.payload,
-            else => unreachable,
+    pub fn errorUnionPayload(ty: Type) Type {
+        return switch (ty.ip_index) {
+            .anyerror_void_error_union_type => Type.void,
+            .none => switch (ty.tag()) {
+                .error_union => ty.castTag(.error_union).?.data.payload,
+                else => unreachable,
+            },
+            else => @panic("TODO"),
         };
     }
 
-    pub fn errorUnionSet(self: Type) Type {
-        return switch (self.tag()) {
-            .anyerror_void_error_union => Type.anyerror,
-            .error_union => self.castTag(.error_union).?.data.error_set,
-            else => unreachable,
+    pub fn errorUnionSet(ty: Type) Type {
+        return switch (ty.ip_index) {
+            .anyerror_void_error_union_type => Type.anyerror,
+            .none => switch (ty.tag()) {
+                .error_union => ty.castTag(.error_union).?.data.error_set,
+                else => unreachable,
+            },
+            else => @panic("TODO"),
         };
     }
 
@@ -4190,67 +3463,73 @@ pub const Type = struct {
     }
 
     /// Asserts the type is an array or vector or struct.
-    pub fn arrayLen(ty: Type) u64 {
-        return switch (ty.tag()) {
-            .vector => ty.castTag(.vector).?.data.len,
-            .array => ty.castTag(.array).?.data.len,
-            .array_sentinel => ty.castTag(.array_sentinel).?.data.len,
-            .array_u8 => ty.castTag(.array_u8).?.data,
-            .array_u8_sentinel_0 => ty.castTag(.array_u8_sentinel_0).?.data,
-            .tuple => ty.castTag(.tuple).?.data.types.len,
-            .anon_struct => ty.castTag(.anon_struct).?.data.types.len,
-            .@"struct" => ty.castTag(.@"struct").?.data.fields.count(),
-            .empty_struct, .empty_struct_literal => 0,
+    pub fn arrayLen(ty: Type, mod: *const Module) u64 {
+        return arrayLenIp(ty, mod.intern_pool);
+    }
 
-            else => unreachable,
+    pub fn arrayLenIp(ty: Type, ip: InternPool) u64 {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .array => ty.castTag(.array).?.data.len,
+                .array_sentinel => ty.castTag(.array_sentinel).?.data.len,
+                .tuple => ty.castTag(.tuple).?.data.types.len,
+                .anon_struct => ty.castTag(.anon_struct).?.data.types.len,
+                .@"struct" => ty.castTag(.@"struct").?.data.fields.count(),
+                .empty_struct, .empty_struct_literal => 0,
+
+                else => unreachable,
+            },
+            else => switch (ip.indexToKey(ty.ip_index)) {
+                .vector_type => |vector_type| vector_type.len,
+                .array_type => |array_type| array_type.len,
+                else => unreachable,
+            },
         };
     }
 
-    pub fn arrayLenIncludingSentinel(ty: Type) u64 {
-        return ty.arrayLen() + @boolToInt(ty.sentinel() != null);
+    pub fn arrayLenIncludingSentinel(ty: Type, mod: *const Module) u64 {
+        return ty.arrayLen(mod) + @boolToInt(ty.sentinel(mod) != null);
     }
 
-    pub fn vectorLen(ty: Type) u32 {
-        return switch (ty.tag()) {
-            .vector => @intCast(u32, ty.castTag(.vector).?.data.len),
-            .tuple => @intCast(u32, ty.castTag(.tuple).?.data.types.len),
-            .anon_struct => @intCast(u32, ty.castTag(.anon_struct).?.data.types.len),
-            else => unreachable,
+    pub fn vectorLen(ty: Type, mod: *const Module) u32 {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .tuple => @intCast(u32, ty.castTag(.tuple).?.data.types.len),
+                .anon_struct => @intCast(u32, ty.castTag(.anon_struct).?.data.types.len),
+                else => unreachable,
+            },
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .vector_type => |vector_type| vector_type.len,
+                else => unreachable,
+            },
         };
     }
 
     /// Asserts the type is an array, pointer or vector.
-    pub fn sentinel(self: Type) ?Value {
-        return switch (self.tag()) {
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .single_const_pointer_to_comptime_int,
-            .vector,
-            .array,
-            .array_u8,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .const_slice_u8,
-            .const_slice,
-            .mut_slice,
-            .tuple,
-            .empty_struct_literal,
-            .@"struct",
-            => return null,
+    pub fn sentinel(ty: Type, mod: *const Module) ?Value {
+        return switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .array,
+                .tuple,
+                .empty_struct_literal,
+                .@"struct",
+                => null,
 
-            .pointer => return self.castTag(.pointer).?.data.sentinel,
-            .array_sentinel => return self.castTag(.array_sentinel).?.data.sentinel,
+                .pointer => ty.castTag(.pointer).?.data.sentinel,
+                .array_sentinel => ty.castTag(.array_sentinel).?.data.sentinel,
 
-            .array_u8_sentinel_0,
-            .const_slice_u8_sentinel_0,
-            .manyptr_const_u8_sentinel_0,
-            => return Value.zero,
+                else => unreachable,
+            },
+            else => switch (mod.intern_pool.indexToKey(ty.ip_index)) {
+                .vector_type,
+                .struct_type,
+                => null,
 
-            else => unreachable,
+                .array_type => |t| if (t.sentinel != .none) t.sentinel.toValue() else null,
+                .ptr_type => |t| if (t.sentinel != .none) t.sentinel.toValue() else null,
+
+                else => unreachable,
+            },
         };
     }
 
@@ -4314,8 +3593,6 @@ pub const Type = struct {
                     return .{ .signedness = .unsigned, .bits = 16 };
                 },
 
-                .vector => ty = ty.castTag(.vector).?.data.elem_type,
-
                 .@"struct" => {
                     const struct_obj = ty.castTag(.@"struct").?.data;
                     assert(struct_obj.layout == .Packed);
@@ -4343,8 +3620,9 @@ pub const Type = struct {
                 .int_type => |int_type| return int_type,
                 .ptr_type => unreachable,
                 .array_type => unreachable,
-                .vector_type => @panic("TODO"),
-                .optional_type => unreachable,
+                .vector_type => |vector_type| ty = vector_type.child.toType(),
+
+                .opt_type => unreachable,
                 .error_union_type => unreachable,
                 .simple_type => unreachable, // handled via Index enum tag above
                 .struct_type => @panic("TODO"),
@@ -4448,7 +3726,11 @@ pub const Type = struct {
 
     /// Asserts the type is a function or a function pointer.
     pub fn fnReturnType(ty: Type) Type {
-        const fn_ty = if (ty.castPointer()) |p| p.data else ty;
+        const fn_ty = switch (ty.tag()) {
+            .pointer => ty.castTag(.pointer).?.data.pointee_type,
+            .function => ty,
+            else => unreachable,
+        };
         return fn_ty.castTag(.function).?.data.return_type;
     }
 
@@ -4538,8 +3820,12 @@ pub const Type = struct {
             },
             .ptr_type => @panic("TODO"),
             .array_type => @panic("TODO"),
-            .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
+            .vector_type => |vector_type| {
+                if (vector_type.len == 0) return Value.initTag(.empty_array);
+                if (vector_type.child.toType().onePossibleValue(mod)) |v| return v;
+                return null;
+            },
+            .opt_type => @panic("TODO"),
             .error_union_type => @panic("TODO"),
             .simple_type => |t| switch (t) {
                 .f16,
@@ -4601,36 +3887,17 @@ pub const Type = struct {
             .error_set,
             .error_set_merged,
             .function,
-            .single_const_pointer_to_comptime_int,
             .array_sentinel,
-            .array_u8_sentinel_0,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .const_slice,
-            .mut_slice,
-            .optional_single_mut_pointer,
-            .optional_single_const_pointer,
-            .anyerror_void_error_union,
             .error_set_inferred,
             .@"opaque",
             .var_args_param,
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
             .anyframe_T,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .single_const_pointer,
-            .single_mut_pointer,
             .pointer,
             .bound_fn,
             => return null,
 
             .optional => {
-                var buf: Payload.ElemType = undefined;
-                const child_ty = ty.optionalChild(&buf);
+                const child_ty = ty.optionalChild(mod);
                 if (child_ty.isNoReturn()) {
                     return Value.null;
                 } else {
@@ -4713,10 +3980,10 @@ pub const Type = struct {
 
             .empty_struct, .empty_struct_literal => return Value.initTag(.empty_struct_value),
 
-            .vector, .array, .array_u8 => {
-                if (ty.arrayLen() == 0)
+            .array => {
+                if (ty.arrayLen(mod) == 0)
                     return Value.initTag(.empty_array);
-                if (ty.elemType().onePossibleValue(mod) != null)
+                if (ty.childType(mod).onePossibleValue(mod) != null)
                     return Value.initTag(.the_only_possible_value);
                 return null;
             },
@@ -4734,9 +4001,9 @@ pub const Type = struct {
         if (ty.ip_index != .none) return switch (mod.intern_pool.indexToKey(ty.ip_index)) {
             .int_type => false,
             .ptr_type => @panic("TODO"),
-            .array_type => @panic("TODO"),
-            .vector_type => @panic("TODO"),
-            .optional_type => @panic("TODO"),
+            .array_type => |array_type| return array_type.child.toType().comptimeOnly(mod),
+            .vector_type => |vector_type| return vector_type.child.toType().comptimeOnly(mod),
+            .opt_type => @panic("TODO"),
             .error_union_type => @panic("TODO"),
             .simple_type => |t| switch (t) {
                 .f16,
@@ -4793,12 +4060,6 @@ pub const Type = struct {
         };
 
         return switch (ty.tag()) {
-            .manyptr_u8,
-            .manyptr_const_u8,
-            .manyptr_const_u8_sentinel_0,
-            .const_slice_u8,
-            .const_slice_u8_sentinel_0,
-            .anyerror_void_error_union,
             .empty_struct_literal,
             .empty_struct,
             .error_set,
@@ -4806,15 +4067,11 @@ pub const Type = struct {
             .error_set_inferred,
             .error_set_merged,
             .@"opaque",
-            .array_u8,
-            .array_u8_sentinel_0,
             .enum_simple,
             => false,
 
-            .single_const_pointer_to_comptime_int,
             // These are function bodies, not function pointers.
-            .function,
-            => true,
+            .function => true,
 
             .var_args_param => unreachable,
             .inferred_alloc_mut => unreachable,
@@ -4823,20 +4080,10 @@ pub const Type = struct {
 
             .array,
             .array_sentinel,
-            .vector,
-            => return ty.childType().comptimeOnly(mod),
+            => return ty.childType(mod).comptimeOnly(mod),
 
-            .pointer,
-            .single_const_pointer,
-            .single_mut_pointer,
-            .many_const_pointer,
-            .many_mut_pointer,
-            .c_const_pointer,
-            .c_mut_pointer,
-            .const_slice,
-            .mut_slice,
-            => {
-                const child_ty = ty.childType();
+            .pointer => {
+                const child_ty = ty.childType(mod);
                 if (child_ty.zigTypeTag(mod) == .Fn) {
                     return false;
                 } else {
@@ -4844,12 +4091,8 @@ pub const Type = struct {
                 }
             },
 
-            .optional,
-            .optional_single_mut_pointer,
-            .optional_single_const_pointer,
-            => {
-                var buf: Type.Payload.ElemType = undefined;
-                return ty.optionalChild(&buf).comptimeOnly(mod);
+            .optional => {
+                return ty.optionalChild(mod).comptimeOnly(mod);
             },
 
             .tuple, .anon_struct => {
@@ -4905,6 +4148,10 @@ pub const Type = struct {
         };
     }
 
+    pub fn isVector(ty: Type, mod: *const Module) bool {
+        return ty.zigTypeTag(mod) == .Vector;
+    }
+
     pub fn isArrayOrVector(ty: Type, mod: *const Module) bool {
         return switch (ty.zigTypeTag(mod)) {
             .Array, .Vector => true,
@@ -4915,9 +4162,9 @@ pub const Type = struct {
     pub fn isIndexable(ty: Type, mod: *const Module) bool {
         return switch (ty.zigTypeTag(mod)) {
             .Array, .Vector => true,
-            .Pointer => switch (ty.ptrSize()) {
+            .Pointer => switch (ty.ptrSize(mod)) {
                 .Slice, .Many, .C => true,
-                .One => ty.elemType().zigTypeTag(mod) == .Array,
+                .One => ty.childType(mod).zigTypeTag(mod) == .Array,
             },
             .Struct => ty.isTuple(),
             else => false,
@@ -4927,10 +4174,10 @@ pub const Type = struct {
     pub fn indexableHasLen(ty: Type, mod: *const Module) bool {
         return switch (ty.zigTypeTag(mod)) {
             .Array, .Vector => true,
-            .Pointer => switch (ty.ptrSize()) {
+            .Pointer => switch (ty.ptrSize(mod)) {
                 .Many, .C => false,
                 .Slice => true,
-                .One => ty.elemType().zigTypeTag(mod) == .Array,
+                .One => ty.childType(mod).zigTypeTag(mod) == .Array,
             },
             .Struct => ty.isTuple(),
             else => false,
@@ -5540,14 +4787,6 @@ pub const Type = struct {
     /// with different enum tags, because the the former requires more payload data than the latter.
     /// See `zigTypeTag` for the function that corresponds to `std.builtin.TypeId`.
     pub const Tag = enum(usize) {
-        // The first section of this enum are tags that require no payload.
-        manyptr_u8,
-        manyptr_const_u8,
-        manyptr_const_u8_sentinel_0,
-        single_const_pointer_to_comptime_int,
-        const_slice_u8,
-        const_slice_u8_sentinel_0,
-        anyerror_void_error_union,
         /// This is a special type for variadic parameters of a function call.
         /// Casts to it will validate that the type can be passed to a c calling convention function.
         var_args_param,
@@ -5562,28 +4801,15 @@ pub const Type = struct {
         bound_fn,
         // After this, the tag requires a payload.
 
-        array_u8,
-        array_u8_sentinel_0,
         array,
         array_sentinel,
-        vector,
         /// Possible Value tags for this: @"struct"
         tuple,
         /// Possible Value tags for this: @"struct"
         anon_struct,
         pointer,
-        single_const_pointer,
-        single_mut_pointer,
-        many_const_pointer,
-        many_mut_pointer,
-        c_const_pointer,
-        c_mut_pointer,
-        const_slice,
-        mut_slice,
         function,
         optional,
-        optional_single_mut_pointer,
-        optional_single_const_pointer,
         error_union,
         anyframe_T,
         error_set,
@@ -5607,35 +4833,14 @@ pub const Type = struct {
 
         pub fn Type(comptime t: Tag) type {
             return switch (t) {
-                .single_const_pointer_to_comptime_int,
-                .anyerror_void_error_union,
-                .const_slice_u8,
-                .const_slice_u8_sentinel_0,
                 .inferred_alloc_const,
                 .inferred_alloc_mut,
                 .var_args_param,
                 .empty_struct_literal,
-                .manyptr_u8,
-                .manyptr_const_u8,
-                .manyptr_const_u8_sentinel_0,
                 .bound_fn,
                 => @compileError("Type Tag " ++ @tagName(t) ++ " has no payload"),
 
-                .array_u8,
-                .array_u8_sentinel_0,
-                => Payload.Len,
-
-                .single_const_pointer,
-                .single_mut_pointer,
-                .many_const_pointer,
-                .many_mut_pointer,
-                .c_const_pointer,
-                .c_mut_pointer,
-                .const_slice,
-                .mut_slice,
                 .optional,
-                .optional_single_mut_pointer,
-                .optional_single_const_pointer,
                 .anyframe_T,
                 => Payload.ElemType,
 
@@ -5643,7 +4848,7 @@ pub const Type = struct {
                 .error_set_inferred => Payload.ErrorSetInferred,
                 .error_set_merged => Payload.ErrorSetMerged,
 
-                .array, .vector => Payload.Array,
+                .array => Payload.Array,
                 .array_sentinel => Payload.ArraySentinel,
                 .pointer => Payload.Pointer,
                 .function => Payload.Function,
@@ -5866,14 +5071,27 @@ pub const Type = struct {
                 @"volatile": bool = false,
                 size: std.builtin.Type.Pointer.Size = .One,
 
-                pub const VectorIndex = enum(u32) {
-                    none = std.math.maxInt(u32),
-                    runtime = std.math.maxInt(u32) - 1,
-                    _,
-                };
+                pub const VectorIndex = InternPool.Key.PtrType.VectorIndex;
+
                 pub fn alignment(data: Data, mod: *const Module) u32 {
                     if (data.@"align" != 0) return data.@"align";
                     return abiAlignment(data.pointee_type, mod);
+                }
+
+                pub fn fromKey(p: InternPool.Key.PtrType) Data {
+                    return .{
+                        .pointee_type = p.elem_type.toType(),
+                        .sentinel = if (p.sentinel != .none) p.sentinel.toValue() else null,
+                        .@"align" = p.alignment,
+                        .@"addrspace" = p.address_space,
+                        .bit_offset = p.bit_offset,
+                        .host_size = p.host_size,
+                        .vector_index = p.vector_index,
+                        .@"allowzero" = p.is_allowzero,
+                        .mutable = !p.is_const,
+                        .@"volatile" = p.is_volatile,
+                        .size = p.size,
+                    };
                 }
             };
         };
@@ -6005,6 +5223,17 @@ pub const Type = struct {
     pub const @"c_ulonglong": Type = .{ .ip_index = .c_ulonglong_type, .legacy = undefined };
     pub const @"c_longdouble": Type = .{ .ip_index = .c_longdouble_type, .legacy = undefined };
 
+    pub const const_slice_u8: Type = .{ .ip_index = .const_slice_u8_type, .legacy = undefined };
+    pub const manyptr_u8: Type = .{ .ip_index = .manyptr_u8_type, .legacy = undefined };
+    pub const single_const_pointer_to_comptime_int: Type = .{
+        .ip_index = .single_const_pointer_to_comptime_int_type,
+        .legacy = undefined,
+    };
+    pub const const_slice_u8_sentinel_0: Type = .{
+        .ip_index = .const_slice_u8_sentinel_0_type,
+        .legacy = undefined,
+    };
+
     pub const generic_poison: Type = .{ .ip_index = .generic_poison_type, .legacy = undefined };
 
     pub const err_int = Type.u16;
@@ -6038,50 +5267,6 @@ pub const Type = struct {
             }
         }
 
-        if (d.@"align" == 0 and d.@"addrspace" == .generic and
-            d.bit_offset == 0 and d.host_size == 0 and d.vector_index == .none and
-            !d.@"allowzero" and !d.@"volatile")
-        {
-            if (d.sentinel) |sent| {
-                if (!d.mutable and d.pointee_type.eql(Type.u8, mod)) {
-                    switch (d.size) {
-                        .Slice => {
-                            if (sent.compareAllWithZero(.eq, mod)) {
-                                return Type.initTag(.const_slice_u8_sentinel_0);
-                            }
-                        },
-                        .Many => {
-                            if (sent.compareAllWithZero(.eq, mod)) {
-                                return Type.initTag(.manyptr_const_u8_sentinel_0);
-                            }
-                        },
-                        else => {},
-                    }
-                }
-            } else if (!d.mutable and d.pointee_type.eql(Type.u8, mod)) {
-                switch (d.size) {
-                    .Slice => return Type.initTag(.const_slice_u8),
-                    .Many => return Type.initTag(.manyptr_const_u8),
-                    else => {},
-                }
-            } else {
-                const T = Type.Tag;
-                const type_payload = try arena.create(Type.Payload.ElemType);
-                type_payload.* = .{
-                    .base = .{
-                        .tag = switch (d.size) {
-                            .One => if (d.mutable) T.single_mut_pointer else T.single_const_pointer,
-                            .Many => if (d.mutable) T.many_mut_pointer else T.many_const_pointer,
-                            .C => if (d.mutable) T.c_mut_pointer else T.c_const_pointer,
-                            .Slice => if (d.mutable) T.mut_slice else T.const_slice,
-                        },
-                    },
-                    .data = d.pointee_type,
-                };
-                return Type.initPayload(&type_payload.base);
-            }
-        }
-
         return Type.Tag.pointer.create(arena, d);
     }
 
@@ -6092,13 +5277,21 @@ pub const Type = struct {
         elem_type: Type,
         mod: *Module,
     ) Allocator.Error!Type {
-        if (elem_type.eql(Type.u8, mod)) {
-            if (sent) |some| {
-                if (some.eql(Value.zero, elem_type, mod)) {
-                    return Tag.array_u8_sentinel_0.create(arena, len);
+        if (elem_type.ip_index != .none) {
+            if (sent) |s| {
+                if (s.ip_index != .none) {
+                    return mod.arrayType(.{
+                        .len = len,
+                        .child = elem_type.ip_index,
+                        .sentinel = s.ip_index,
+                    });
                 }
             } else {
-                return Tag.array_u8.create(arena, len);
+                return mod.arrayType(.{
+                    .len = len,
+                    .child = elem_type.ip_index,
+                    .sentinel = .none,
+                });
             }
         }
 
@@ -6116,24 +5309,11 @@ pub const Type = struct {
         });
     }
 
-    pub fn vector(arena: Allocator, len: u64, elem_type: Type) Allocator.Error!Type {
-        return Tag.vector.create(arena, .{
-            .len = len,
-            .elem_type = elem_type,
-        });
-    }
-
-    pub fn optional(arena: Allocator, child_type: Type) Allocator.Error!Type {
-        switch (child_type.tag()) {
-            .single_const_pointer => return Type.Tag.optional_single_const_pointer.create(
-                arena,
-                child_type.elemType(),
-            ),
-            .single_mut_pointer => return Type.Tag.optional_single_mut_pointer.create(
-                arena,
-                child_type.elemType(),
-            ),
-            else => return Type.Tag.optional.create(arena, child_type),
+    pub fn optional(arena: Allocator, child_type: Type, mod: *Module) Allocator.Error!Type {
+        if (child_type.ip_index != .none) {
+            return mod.optionalType(child_type.ip_index);
+        } else {
+            return Type.Tag.optional.create(arena, child_type);
         }
     }
 
@@ -6144,12 +5324,6 @@ pub const Type = struct {
         mod: *Module,
     ) Allocator.Error!Type {
         assert(error_set.zigTypeTag(mod) == .ErrorSet);
-        if (error_set.eql(Type.anyerror, mod) and
-            payload.eql(Type.void, mod))
-        {
-            return Type.initTag(.anyerror_void_error_union);
-        }
-
         return Type.Tag.error_union.create(arena, .{
             .error_set = error_set,
             .payload = payload,

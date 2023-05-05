@@ -1318,7 +1318,7 @@ fn analyzeOperands(
             _ = data.live_set.remove(inst);
 
             for (operands) |op_ref| {
-                const operand = Air.refToIndex(op_ref) orelse continue;
+                const operand = Air.refToIndexAllowNone(op_ref) orelse continue;
 
                 // Don't compute any liveness for constants
                 switch (inst_tags[operand]) {
@@ -1358,7 +1358,7 @@ fn analyzeOperands(
                 while (i > 0) {
                     i -= 1;
                     const op_ref = operands[i];
-                    const operand = Air.refToIndex(op_ref) orelse continue;
+                    const operand = Air.refToIndexAllowNone(op_ref) orelse continue;
 
                     // Don't compute any liveness for constants
                     switch (inst_tags[operand]) {

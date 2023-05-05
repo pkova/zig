@@ -366,12 +366,14 @@ const Writer = struct {
     }
 
     fn writeType(w: *Writer, s: anytype, ty: Type) !void {
-        const t = ty.tag();
-        switch (t) {
-            .inferred_alloc_const => try s.writeAll("(inferred_alloc_const)"),
-            .inferred_alloc_mut => try s.writeAll("(inferred_alloc_mut)"),
-            .var_args_param => try s.writeAll("(var_args_param)"),
-            .bound_fn => try s.writeAll("(bound_fn)"),
+        switch (ty.ip_index) {
+            .none => switch (ty.tag()) {
+                .inferred_alloc_const => try s.writeAll("(inferred_alloc_const)"),
+                .inferred_alloc_mut => try s.writeAll("(inferred_alloc_mut)"),
+                .var_args_param => try s.writeAll("(var_args_param)"),
+                .bound_fn => try s.writeAll("(bound_fn)"),
+                else => try ty.print(s, w.module),
+            },
             else => try ty.print(s, w.module),
         }
     }

@@ -551,7 +551,7 @@ pub const DeclGen = struct {
                     // TODO: Properly lower function pointers. For now we are going to hack around it and
                     // just generate an empty pointer. Function pointers are represented by usize for now,
                     // though.
-                    try self.addInt(Type.usize, Value.initTag(.zero));
+                    try self.addInt(Type.usize, Value.zero);
                     return;
                 },
                 .extern_fn => unreachable, // TODO
@@ -704,8 +704,7 @@ pub const DeclGen = struct {
                     try self.addUndef(padding);
                 },
                 .Enum => {
-                    var int_val_buffer: Value.Payload.U64 = undefined;
-                    const int_val = val.enumToInt(ty, &int_val_buffer);
+                    const int_val = try val.enumToInt(ty, mod);
 
                     const int_ty = ty.intTagType();
 
@@ -748,22 +747,24 @@ pub const DeclGen = struct {
 
                     try self.addUndef(layout.padding);
                 },
-                .ErrorSet => switch (val.tag()) {
-                    .@"error" => {
-                        const err_name = val.castTag(.@"error").?.data.name;
-                        const kv = try dg.module.getErrorValue(err_name);
-                        try self.addConstInt(u16, @intCast(u16, kv.value));
+                .ErrorSet => switch (val.ip_index) {
+                    .none => switch (val.tag()) {
+                        .@"error" => {
+                            const err_name = val.castTag(.@"error").?.data.name;
+                            const kv = try dg.module.getErrorValue(err_name);
+                            try self.addConstInt(u16, @intCast(u16, kv.value));
+                        },
+                        else => unreachable,
                     },
-                    .zero => {
-                        // Unactivated error set.
-                        try self.addConstInt(u16, 0);
+                    else => switch (mod.intern_pool.indexToKey(val.ip_index)) {
+                        .int => |int| try self.addConstInt(u16, @intCast(u16, int.storage.u64)),
+                        else => unreachable,
                     },
-                    else => unreachable,
                 },
                 .ErrorUnion => {
                     const payload_ty = ty.errorUnionPayload();
                     const is_pl = val.errorUnionIsPayload();
-                    const error_val = if (!is_pl) val else Value.initTag(.zero);
+                    const error_val = if (!is_pl) val else Value.zero;
 
                     if (!payload_ty.hasRuntimeBitsIgnoreComptime(mod)) {
                         return try self.lower(Type.anyerror, error_val);
@@ -1834,8 +1835,7 @@ pub const DeclGen = struct {
 
         var i: usize = 0;
         while (i < mask_len) : (i += 1) {
-            var buf: Value.ElemValueBuffer = undefined;
-            const elem = mask.elemValueBuffer(self.module, i, &buf);
+            const elem = try mask.elemValue(self.module, i);
             if (elem.isUndef()) {
                 self.func.body.writeOperand(spec.LiteralInteger, 0xFFFF_FFFF);
             } else {
@@ -2538,9 +2538,8 @@ pub const DeclGen = struct {
                     const int_val = switch (cond_ty.zigTypeTag(mod)) {
                         .Int => if (cond_ty.isSignedInt(mod)) @bitCast(u64, value.toSignedInt(mod)) else value.toUnsignedInt(mod),
                         .Enum => blk: {
-                            var int_buffer: Value.Payload.U64 = undefined;
                             // TODO: figure out of cond_ty is correct (something with enum literals)
-                            break :blk value.enumToInt(cond_ty, &int_buffer).toUnsignedInt(mod); // TODO: composite integer constants
+                            break :blk (try value.enumToInt(cond_ty, mod)).toUnsignedInt(mod); // TODO: composite integer constants
                         },
                         else => unreachable,
                     };
